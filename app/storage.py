@@ -1,4 +1,4 @@
-"""SQLite storage bootstrap for the small single-instance MVP.
+"""SQLite storage bootstrap and persistence helpers for the small single-instance MVP.
 
 The schema encodes the important reliability and product rules in the database where
 possible: notification deduplication is UNIQUE, outbox work uses expiring leases,
@@ -8,8 +8,15 @@ records include the timestamps needed to evaluate the V1 task-oriented plans.
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
+from typing import Iterable
+
+from .events import QuotaEvent, QuotaState
+from .observations import QuotaObservation
+from .quota import QuotaKey, QuotaStatus
 
 
 SCHEMA_SQL = """
@@ -233,3 +240,181 @@ def initialize_database(connection: sqlite3.Connection) -> None:
     _ensure_v2_indexes(connection)
     connection.execute("PRAGMA user_version = 2")
     connection.commit()
+
+
+def _datetime_to_text(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("database datetimes must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _datetime_from_text(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("stored datetime must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def set_runtime_state(
+    connection: sqlite3.Connection,
+    key: str,
+    value: str,
+    *,
+    updated_at: datetime,
+) -> None:
+    if not key.strip():
+        raise ValueError("runtime state key must not be empty")
+    connection.execute(
+        """
+        INSERT INTO runtime_state(key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        (key, value, _datetime_to_text(updated_at)),
+    )
+
+
+def get_runtime_state(connection: sqlite3.Connection, key: str) -> str | None:
+    row = connection.execute(
+        "SELECT value FROM runtime_state WHERE key = ?",
+        (key,),
+    ).fetchone()
+    return None if row is None else str(row["value"])
+
+
+def record_observation(
+    connection: sqlite3.Connection,
+    observation: QuotaObservation,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO quota_observations(
+            observed_at, outcome, source_updated_at, payload_hash, parser_version,
+            office_count, quota_count, error_code
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _datetime_to_text(observation.observed_at),
+            observation.outcome.value,
+            _datetime_to_text(observation.source_updated_at),
+            observation.payload_hash,
+            observation.parser_version,
+            observation.office_count,
+            observation.quota_count,
+            observation.error_code,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def load_quota_states(connection: sqlite3.Connection) -> dict[QuotaKey, QuotaState]:
+    rows = connection.execute(
+        """
+        SELECT quota_date, office_id, status, service_periods_json, occurrence_id,
+               first_observed_at, last_observed_at, source_updated_at, missing_count
+        FROM quota_state
+        """
+    ).fetchall()
+
+    states: dict[QuotaKey, QuotaState] = {}
+    for row in rows:
+        raw_periods = json.loads(row["service_periods_json"])
+        if not isinstance(raw_periods, list) or not all(
+            isinstance(period, str) for period in raw_periods
+        ):
+            raise ValueError("invalid service_periods_json in quota_state")
+
+        key = QuotaKey(date.fromisoformat(row["quota_date"]), str(row["office_id"]))
+        first_observed_at = _datetime_from_text(row["first_observed_at"])
+        last_observed_at = _datetime_from_text(row["last_observed_at"])
+        if first_observed_at is None or last_observed_at is None:
+            raise ValueError("quota_state observed timestamps must not be null")
+
+        states[key] = QuotaState(
+            key=key,
+            status=QuotaStatus(str(row["status"])),
+            occurrence_id=row["occurrence_id"],
+            first_observed_at=first_observed_at,
+            last_observed_at=last_observed_at,
+            source_updated_at=_datetime_from_text(row["source_updated_at"]),
+            service_periods=tuple(raw_periods),
+            missing_count=int(row["missing_count"]),
+        )
+    return states
+
+
+def save_quota_states(
+    connection: sqlite3.Connection,
+    states: Iterable[QuotaState],
+) -> None:
+    connection.executemany(
+        """
+        INSERT INTO quota_state(
+            quota_date, office_id, status, service_periods_json, occurrence_id,
+            first_observed_at, last_observed_at, source_updated_at, missing_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(quota_date, office_id) DO UPDATE SET
+            status = excluded.status,
+            service_periods_json = excluded.service_periods_json,
+            occurrence_id = excluded.occurrence_id,
+            first_observed_at = excluded.first_observed_at,
+            last_observed_at = excluded.last_observed_at,
+            source_updated_at = excluded.source_updated_at,
+            missing_count = excluded.missing_count
+        """,
+        [
+            (
+                state.key.date.isoformat(),
+                state.key.office_id,
+                state.status.value,
+                json.dumps(list(state.service_periods), separators=(",", ":")),
+                state.occurrence_id,
+                _datetime_to_text(state.first_observed_at),
+                _datetime_to_text(state.last_observed_at),
+                _datetime_to_text(state.source_updated_at),
+                state.missing_count,
+            )
+            for state in states
+        ],
+    )
+
+
+def insert_quota_events(
+    connection: sqlite3.Connection,
+    events: Iterable[QuotaEvent],
+    *,
+    created_at: datetime,
+) -> list[int]:
+    inserted_ids: list[int] = []
+    created_at_text = _datetime_to_text(created_at)
+    for event in events:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO quota_events(
+                quota_date, office_id, from_status, to_status, occurrence_id,
+                observed_at, source_updated_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.key.date.isoformat(),
+                event.key.office_id,
+                event.from_status.value,
+                event.to_status.value,
+                event.occurrence_id,
+                _datetime_to_text(event.observed_at),
+                _datetime_to_text(event.source_updated_at),
+                created_at_text,
+            ),
+        )
+        if cursor.rowcount == 1:
+            inserted_ids.append(int(cursor.lastrowid))
+    return inserted_ids
