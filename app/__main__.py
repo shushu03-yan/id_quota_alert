@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import logging
 
 from .config import load_settings
 from .poller import QuotaPoller
@@ -40,6 +41,10 @@ def _print_status() -> None:
 
 def _run_poller(*, once: bool) -> int:
     settings = load_settings()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     connection = connect_database(settings.database_path)
     source = GovHKQuotaSourceAdapter(
         service_id=settings.quota_source_service_id,
