@@ -104,9 +104,6 @@ CREATE TABLE IF NOT EXISTS subscription_filters (
 CREATE INDEX IF NOT EXISTS idx_subscription_filters_subscription
 ON subscription_filters(subscription_id);
 
-CREATE INDEX IF NOT EXISTS idx_subscription_filters_target
-ON subscription_filters(subscription_id, target_key);
-
 CREATE TABLE IF NOT EXISTS notification_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     subscription_id INTEGER NOT NULL REFERENCES subscriptions(id),
@@ -146,20 +143,6 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT NOT NULL,
     paid_at TEXT
 );
-"""
-
-
-MIGRATION_V2_SQL = """
-ALTER TABLE customers ADD COLUMN trial_used_at TEXT;
-
-ALTER TABLE subscriptions ADD COLUMN activated_at TEXT;
-ALTER TABLE subscriptions ADD COLUMN original_expires_at TEXT;
-ALTER TABLE subscriptions ADD COLUMN guarantee_extended_at TEXT;
-ALTER TABLE subscriptions ADD COLUMN first_matched_event_at TEXT;
-ALTER TABLE subscriptions ADD COLUMN first_notification_queued_at TEXT;
-ALTER TABLE subscriptions ADD COLUMN first_provider_accepted_at TEXT;
-
-ALTER TABLE subscription_filters ADD COLUMN target_key TEXT NOT NULL DEFAULT 'default';
 """
 
 
@@ -223,6 +206,10 @@ def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
         if not _column_exists(connection, table, column):
             connection.execute(statement)
 
+
+def _ensure_v2_indexes(connection: sqlite3.Connection) -> None:
+    """Create indexes that depend on columns introduced by schema v2."""
+
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_subscription_filters_target
@@ -236,10 +223,13 @@ def initialize_database(connection: sqlite3.Connection) -> None:
 
     current_version = connection.execute("PRAGMA user_version").fetchone()[0]
 
+    # Create all tables and indexes that are safe for both fresh and legacy DBs.
+    # Version-dependent indexes are created only after missing columns are added.
     connection.executescript(SCHEMA_SQL)
 
     if current_version < 2:
         _migrate_v1_to_v2(connection)
 
+    _ensure_v2_indexes(connection)
     connection.execute("PRAGMA user_version = 2")
     connection.commit()
