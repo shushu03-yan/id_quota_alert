@@ -14,7 +14,7 @@ import os
 import socket
 import time
 
-from .config import load_settings
+from .config import load_settings, validate_token_signing_secret
 from .backup import create_backup
 from .email_provider import SMTPEmailProvider, SMTPSettings
 from .lifecycle import create_activation_code, create_magic_link, list_activation_codes, revoke_activation_code
@@ -174,7 +174,10 @@ def _run_web(host: str, port: int) -> int:
 
     secret = os.getenv("TOKEN_SIGNING_SECRET", "")
     base_url = os.getenv("PUBLIC_BASE_URL", f"http://{host}:{port}")
-    app = WebApplication(load_settings().database_path, signing_secret=secret, public_base_url=base_url)
+    settings = load_settings()
+    app = WebApplication(
+        settings.database_path, signing_secret=secret, public_base_url=base_url, app_env=settings.app_env
+    )
 
     class NoTokenLoggingHandler(WSGIRequestHandler):
         def log_message(self, format, *args):
@@ -209,9 +212,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "activation-code":
         return _run_activation_code(args)
     if args.command == "magic-link":
-        secret = os.getenv("TOKEN_SIGNING_SECRET", "")
-        if len(secret) < 32:
-            raise ValueError("TOKEN_SIGNING_SECRET must contain at least 32 characters")
+        settings = load_settings()
+        secret = validate_token_signing_secret(
+            os.getenv("TOKEN_SIGNING_SECRET", ""), app_env=settings.app_env
+        )
         connection = _database()
         try:
             _, token = create_magic_link(connection, customer_id=args.customer_id,

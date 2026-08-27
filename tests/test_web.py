@@ -2,7 +2,12 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from urllib.parse import urlencode
 
-from app.lifecycle import begin_activation, create_activation_code, create_magic_link, verification_token
+import pytest
+
+from app.config import TOKEN_SIGNING_SECRET_PLACEHOLDER
+from app.lifecycle import (
+    begin_activation, create_activation_code, create_magic_link, verification_token, verify_activation,
+)
 from app.storage import connect_database, initialize_database
 from app.web import WebApplication
 
@@ -38,3 +43,43 @@ def test_activation_verify_manage_and_unsubscribe_routes(tmp_path):
     assert _request(app, "/unsubscribe", query=urlencode({"token": magic}))[0] == "200 OK"
     assert _request(app, "/unsubscribe", method="POST", form={"token": magic})[0] == "200 OK"
     assert connection.execute("SELECT active FROM subscriptions").fetchone()[0] == 0
+
+
+def test_magic_link_target_update_uses_strict_date_validation(tmp_path):
+    path = tmp_path / "web-targets.sqlite3"
+    connection = connect_database(path)
+    initialize_database(connection)
+    code = create_activation_code(connection, plan_code="goal", now=NOW)
+    vid = begin_activation(
+        connection, code=code, email="u@example.com", targets=TARGET,
+        now=NOW, base_url="https://example.test", signing_secret=SECRET,
+    )
+    sub_id = verify_activation(
+        connection, token=verification_token(vid, signing_secret=SECRET), now=NOW + timedelta(minutes=1)
+    )
+    customer_id = connection.execute(
+        "SELECT customer_id FROM subscriptions WHERE id=?", (sub_id,)
+    ).fetchone()[0]
+    _, magic = create_magic_link(
+        connection, customer_id=customer_id, subscription_id=sub_id, now=NOW,
+        signing_secret=SECRET,
+    )
+    app = WebApplication(path, signing_secret=SECRET, public_base_url="https://example.test")
+    status, body = _request(
+        app, "/manage", method="POST",
+        form={"token": magic, "targets": '[{"target_key":"a","earliest_date":"2026-9-01","deadline":"2026-09-10","offices":["sha-tin"],"minimum_status":"limited"}]'},
+    )
+    assert status == "400 Bad Request"
+    assert "YYYY-MM-DD" in body
+
+
+def test_non_development_rejects_example_signing_secret(tmp_path):
+    with pytest.raises(ValueError, match="example placeholder"):
+        WebApplication(
+            tmp_path / "web.sqlite3", signing_secret=TOKEN_SIGNING_SECRET_PLACEHOLDER,
+            public_base_url="https://example.test", app_env="production",
+        )
+    WebApplication(
+        tmp_path / "web.sqlite3", signing_secret=TOKEN_SIGNING_SECRET_PLACEHOLDER,
+        public_base_url="http://127.0.0.1:8080", app_env="development",
+    )

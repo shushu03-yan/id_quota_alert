@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 import json
 import os
 from pathlib import Path
 from urllib.parse import parse_qs
 
+from .config import validate_token_signing_secret
 from .lifecycle import (
     PLANS, begin_activation, consume_magic_link, hash_secret, normalize_email,
     unsubscribe_customer, validate_targets, verify_activation,
@@ -28,9 +29,11 @@ def _form_data(environ: dict[str, object]) -> dict[str, str]:
 
 
 class WebApplication:
-    def __init__(self, database_path: Path | str, *, signing_secret: str, public_base_url: str) -> None:
-        if len(signing_secret) < 32:
-            raise ValueError("TOKEN_SIGNING_SECRET must contain at least 32 characters")
+    def __init__(
+        self, database_path: Path | str, *, signing_secret: str, public_base_url: str,
+        app_env: str | None = None,
+    ) -> None:
+        validate_token_signing_secret(signing_secret, app_env=app_env or os.getenv("APP_ENV", "development"))
         self.database_path = Path(database_path)
         self.signing_secret = signing_secret
         self.public_base_url = public_base_url.rstrip("/")
@@ -76,7 +79,10 @@ class WebApplication:
                 if subscription_id is None:
                     raise ValueError("link has no subscription")
                 plan_code = connection.execute("SELECT plan_code FROM subscriptions WHERE id=? AND customer_id=?", (subscription_id, customer_id)).fetchone()[0]
-                targets = validate_targets(plan_code, json.loads(data["targets"]))
+                targets = validate_targets(
+                    plan_code, json.loads(data["targets"]),
+                    business_date=now.astimezone(timezone(timedelta(hours=8))).date(),
+                )
                 connection.execute("DELETE FROM subscription_filters WHERE subscription_id=?", (subscription_id,))
                 for target in targets:
                     for office in target["offices"]:

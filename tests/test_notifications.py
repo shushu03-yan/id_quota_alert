@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import sqlite3
 
 from app.email_provider import EmailDeliveryResult
-from app.notifications import EmailWorker, claim_notification, match_quota_event, queue_notification
+from app.notifications import EmailWorker, claim_notification, match_pending_events, match_quota_event, queue_notification
 from app.storage import connect_database, initialize_database
 
 
@@ -24,13 +24,19 @@ def _db(tmp_path):
     return connection
 
 
-def _subscription_event(connection):
+def _subscription_event(
+    connection,
+    *,
+    activated_at="2026-08-28T10:00:00Z",
+    observed_at="2026-08-28T12:00:00Z",
+):
     customer_id = connection.execute("INSERT INTO customers(email_normalized,created_at,consent_source) VALUES ('u@example.com',?,'test')", ("2026-08-28T10:00:00Z",)).lastrowid
     sub_id = connection.execute("""INSERT INTO subscriptions(customer_id,plan_code,starts_at,activated_at,original_expires_at,expires_at,active,created_at)
-        VALUES (?,'goal','2026-08-28T10:00:00Z','2026-08-28T10:00:00Z','2026-09-11T10:00:00Z','2026-09-11T10:00:00Z',1,'2026-08-28T10:00:00Z')""", (customer_id,)).lastrowid
+        VALUES (?,'goal',? ,?,'2026-09-11T10:00:00Z','2026-09-11T10:00:00Z',1,?)""",
+        (customer_id, activated_at, activated_at, activated_at)).lastrowid
     connection.execute("INSERT INTO subscription_filters(subscription_id,target_key,earliest_date,deadline,office_id,minimum_status) VALUES (?,'a','2026-09-01','2026-09-10','sha-tin','limited')", (sub_id,))
     event_id = connection.execute("""INSERT INTO quota_events(quota_date,office_id,from_status,to_status,occurrence_id,observed_at,created_at)
-        VALUES ('2026-09-03','sha-tin','unavailable','available','occ','2026-08-28T12:00:00Z','2026-08-28T12:00:00Z')""").lastrowid
+        VALUES ('2026-09-03','sha-tin','unavailable','available','occ',?,?)""", (observed_at, observed_at)).lastrowid
     connection.commit()
     return customer_id, sub_id, event_id
 
@@ -43,6 +49,50 @@ def test_matcher_queues_once_and_sets_first_metrics(tmp_path):
     row = connection.execute("SELECT first_matched_event_at,first_notification_queued_at FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
     assert row[0] == row[1] == "2026-08-28T12:00:00Z"
     assert connection.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 1
+
+
+def test_event_before_activation_does_not_create_outbox(tmp_path):
+    connection = _db(tmp_path)
+    _, sub_id, event_id = _subscription_event(
+        connection, activated_at="2026-08-28T11:00:00Z", observed_at="2026-08-28T10:59:59Z"
+    )
+    assert match_quota_event(connection, event_id, now=NOW) == 0
+    assert connection.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 0
+    assert connection.execute(
+        "SELECT first_matched_event_at FROM subscriptions WHERE id=?", (sub_id,)
+    ).fetchone()[0] is None
+
+
+def test_event_after_activation_creates_outbox_using_event_time(tmp_path):
+    connection = _db(tmp_path)
+    _, sub_id, event_id = _subscription_event(
+        connection, activated_at="2026-08-28T11:00:00Z", observed_at="2026-08-28T11:00:01Z"
+    )
+    assert match_quota_event(connection, event_id, now=NOW) == 1
+    assert connection.execute(
+        "SELECT first_matched_event_at FROM subscriptions WHERE id=?", (sub_id,)
+    ).fetchone()[0] == "2026-08-28T11:00:01Z"
+
+
+def test_worker_restart_never_sends_processed_backlog_to_new_subscription(tmp_path):
+    connection = _db(tmp_path)
+    event_id = connection.execute("""INSERT INTO quota_events(
+        quota_date,office_id,from_status,to_status,occurrence_id,observed_at,created_at)
+        VALUES ('2026-09-03','sha-tin','unavailable','available','backlog',
+                '2026-08-28T10:00:00Z','2026-08-28T10:00:00Z')""").lastrowid
+    connection.commit()
+    assert match_pending_events(connection, now=NOW) == 0
+    assert connection.execute(
+        "SELECT COUNT(*) FROM matched_quota_events WHERE quota_event_id=?", (event_id,)
+    ).fetchone()[0] == 1
+
+    _subscription_event(
+        connection, activated_at="2026-08-28T11:00:00Z", observed_at="2026-08-28T12:00:00Z"
+    )
+    assert match_pending_events(connection, now=NOW + timedelta(minutes=1)) == 1
+    assert connection.execute(
+        "SELECT COUNT(*) FROM notification_outbox WHERE quota_event_id=?", (event_id,)
+    ).fetchone()[0] == 0
 
 
 def test_email_worker_success_saves_provider_id_attempt_and_first_acceptance(tmp_path):

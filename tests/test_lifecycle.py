@@ -73,6 +73,95 @@ def test_plan_target_limits_and_trial_office_rule():
     assert len(validate_targets("trial", [dict(TARGET[0], offices=["*"])])) == 1
 
 
+@pytest.mark.parametrize("value", ["2026-9-01", "20260901", "2026-02-30", "not-a-date"])
+def test_target_dates_require_real_strict_iso_dates(value):
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        validate_targets("goal", [dict(TARGET[0], earliest_date=value)])
+
+
+def test_target_date_range_must_not_be_reversed():
+    with pytest.raises(ValueError, match="date range"):
+        validate_targets(
+            "goal", [dict(TARGET[0], earliest_date="2026-09-11", deadline="2026-09-10")]
+        )
+
+
+def test_begin_activation_rejects_fully_expired_target(tmp_path):
+    connection = _db(tmp_path)
+    code = create_activation_code(connection, plan_code="goal", now=NOW)
+    with pytest.raises(ValueError, match="deadline has already passed"):
+        begin_activation(
+            connection, code=code, email="u@example.com",
+            targets=[dict(TARGET[0], earliest_date="2026-08-01", deadline="2026-08-27")],
+            now=NOW, base_url="https://example.test", signing_secret=SECRET,
+        )
+
+
+def test_verify_activation_rejects_target_that_expired_while_waiting(tmp_path):
+    connection = _db(tmp_path)
+    late_hong_kong_evening = datetime(2026, 8, 28, 15, 59, tzinfo=timezone.utc)
+    code = create_activation_code(connection, plan_code="goal", now=late_hong_kong_evening)
+    verification_id = begin_activation(
+        connection, code=code, email="u@example.com",
+        targets=[dict(TARGET[0], earliest_date="2026-08-28", deadline="2026-08-28")],
+        now=late_hong_kong_evening, base_url="https://example.test", signing_secret=SECRET,
+    )
+    with pytest.raises(ValueError, match="deadline has already passed"):
+        verify_activation(
+            connection, token=verification_token(verification_id, signing_secret=SECRET),
+            now=late_hong_kong_evening + timedelta(minutes=2),
+        )
+    assert connection.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0] == 0
+
+
+def test_two_connections_cannot_reserve_same_code_for_different_customers(tmp_path):
+    path = tmp_path / "reservation-race.sqlite3"
+    first = connect_database(path)
+    initialize_database(first)
+    code = create_activation_code(first, plan_code="goal", now=NOW)
+    second = connect_database(path)
+    initialize_database(second)
+
+    begin_activation(
+        first, code=code, email="one@example.com", targets=TARGET, now=NOW,
+        base_url="https://example.test", signing_secret=SECRET,
+    )
+    with pytest.raises(ValueError, match="reserved"):
+        begin_activation(
+            second, code=code, email="two@example.com", targets=TARGET, now=NOW,
+            base_url="https://example.test", signing_secret=SECRET,
+        )
+    owner = second.execute("""SELECT c.email_normalized FROM activation_codes a
+        JOIN customers c ON c.id=a.reserved_customer_id""").fetchone()[0]
+    assert owner == "one@example.com"
+
+
+def test_expired_reservation_can_be_reacquired_and_old_owner_cannot_verify(tmp_path):
+    path = tmp_path / "reservation-expiry.sqlite3"
+    first = connect_database(path)
+    initialize_database(first)
+    code = create_activation_code(first, plan_code="goal", now=NOW)
+    first_id = begin_activation(
+        first, code=code, email="one@example.com", targets=TARGET, now=NOW,
+        base_url="https://example.test", signing_secret=SECRET, verification_ttl=timedelta(minutes=1),
+    )
+    second = connect_database(path)
+    initialize_database(second)
+    second_id = begin_activation(
+        second, code=code, email="two@example.com", targets=TARGET, now=NOW + timedelta(minutes=2),
+        base_url="https://example.test", signing_secret=SECRET,
+    )
+    with pytest.raises(ValueError, match="does not own"):
+        verify_activation(
+            first, token=verification_token(first_id, signing_secret=SECRET),
+            now=NOW + timedelta(seconds=30),
+        )
+    assert verify_activation(
+        second, token=verification_token(second_id, signing_secret=SECRET),
+        now=NOW + timedelta(minutes=3),
+    ) > 0
+
+
 def test_trial_can_only_be_redeemed_once_per_email(tmp_path):
     connection = _db(tmp_path)
     first = create_activation_code(connection, plan_code="trial", now=NOW)
@@ -104,6 +193,9 @@ def test_zero_match_guarantee_extends_goal_once_only(tmp_path):
     customer_id = connection.execute("INSERT INTO customers(email_normalized,created_at,consent_source) VALUES ('u@example.com','2026-08-01T00:00:00Z','test')").lastrowid
     sub_id = connection.execute("""INSERT INTO subscriptions(customer_id,plan_code,starts_at,activated_at,original_expires_at,expires_at,active,created_at)
         VALUES (?,'goal','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z','2026-08-15T00:00:00Z','2026-08-15T00:00:00Z',1,'2026-08-01T00:00:00Z')""", (customer_id,)).lastrowid
+    connection.execute("""INSERT INTO subscription_filters(
+        subscription_id,target_key,earliest_date,deadline,office_id,minimum_status)
+        VALUES (?,'a','2026-08-01','2026-09-10','sha-tin','limited')""", (sub_id,))
     connection.commit()
     assert extend_zero_match_guarantees(connection, now=NOW) == 1
     assert extend_zero_match_guarantees(connection, now=NOW + timedelta(days=1)) == 0
@@ -119,6 +211,31 @@ def test_matching_or_ineligible_plan_never_extends(tmp_path):
             VALUES (?,?, '2026-08-01T00:00:00Z','2026-08-01T00:00:00Z','2026-08-15T00:00:00Z','2026-08-15T00:00:00Z',1,?,'2026-08-01T00:00:00Z')""", (customer_id, plan, match))
     connection.commit()
     assert extend_zero_match_guarantees(connection, now=NOW) == 0
+
+
+@pytest.mark.parametrize(
+    ("earliest", "deadline"),
+    [("bad-date", "2026-09-10"), ("2026-08-01", "2026-08-27"), ("2026-09-11", "2026-09-10")],
+)
+def test_invalid_or_expired_targets_never_receive_guarantee(tmp_path, earliest, deadline):
+    connection = _db(tmp_path)
+    customer_id = connection.execute(
+        "INSERT INTO customers(email_normalized,created_at,consent_source) VALUES ('u@example.com','2026-08-01T00:00:00Z','test')"
+    ).lastrowid
+    sub_id = connection.execute("""INSERT INTO subscriptions(
+        customer_id,plan_code,starts_at,activated_at,original_expires_at,expires_at,active,created_at)
+        VALUES (?,'goal','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z',
+                '2026-08-15T00:00:00Z','2026-08-15T00:00:00Z',1,'2026-08-01T00:00:00Z')""",
+        (customer_id,),
+    ).lastrowid
+    connection.execute("""INSERT INTO subscription_filters(
+        subscription_id,target_key,earliest_date,deadline,office_id,minimum_status)
+        VALUES (?,'a',?,?,'sha-tin','limited')""", (sub_id, earliest, deadline))
+    connection.commit()
+    assert extend_zero_match_guarantees(connection, now=NOW) == 0
+    assert connection.execute(
+        "SELECT guarantee_extended_at FROM subscriptions WHERE id=?", (sub_id,)
+    ).fetchone()[0] is None
 
 
 def test_unsubscribe_deactivates_and_cancels_pending_quota_mail(tmp_path):

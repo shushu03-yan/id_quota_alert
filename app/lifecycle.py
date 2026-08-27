@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import base64
 import hashlib
 import hmac
@@ -32,6 +32,7 @@ PLANS = {
     "family": Plan("family", timedelta(days=14), 10, 3, timedelta(days=7)),
 }
 CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+HONG_KONG_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def normalize_email(email: str) -> str:
@@ -82,18 +83,46 @@ def revoke_activation_code(connection: sqlite3.Connection, code_id: int) -> bool
     return cursor.rowcount == 1
 
 
-def validate_targets(plan_code: str, targets: Iterable[dict[str, object]]) -> list[dict[str, object]]:
+def _parse_target_date(value: object) -> date:
+    text = str(value)
+    if len(text) != 10 or text[4] != "-" or text[7] != "-" or not text.replace("-", "").isdigit():
+        raise ValueError("target dates must use YYYY-MM-DD")
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError("target dates must use YYYY-MM-DD") from exc
+    if parsed.isoformat() != text:
+        raise ValueError("target dates must use YYYY-MM-DD")
+    return parsed
+
+
+def _hong_kong_date(now: datetime) -> date:
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    return now.astimezone(HONG_KONG_TIMEZONE).date()
+
+
+def validate_targets(
+    plan_code: str,
+    targets: Iterable[dict[str, object]],
+    *,
+    business_date: date | None = None,
+) -> list[dict[str, object]]:
     plan = PLANS[plan_code]
-    normalized = list(targets)
+    normalized = [dict(target) for target in targets]
     keys = {str(target.get("target_key", "")) for target in normalized}
     if not normalized or "" in keys or len(keys) != len(normalized) or len(keys) > plan.max_targets:
         raise ValueError("target count or target_key violates plan limit")
     for target in normalized:
         earliest, deadline = str(target.get("earliest_date", "")), str(target.get("deadline", ""))
+        earliest_date = _parse_target_date(earliest)
+        deadline_date = _parse_target_date(deadline)
         offices = target.get("offices")
         minimum = str(target.get("minimum_status", ""))
-        if not earliest or not deadline or earliest > deadline:
+        if earliest_date > deadline_date:
             raise ValueError("invalid target date range")
+        if business_date is not None and deadline_date < business_date:
+            raise ValueError("target deadline has already passed")
         if not isinstance(offices, list) or not offices or not all(isinstance(x, str) and x for x in offices):
             raise ValueError("target requires one or more offices")
         if "*" in offices and len(offices) != 1:
@@ -127,41 +156,56 @@ def begin_activation(
         connection.commit()
         raise ValueError("activation code expired")
     plan_code = str(row["plan_code"])
-    normalized_targets = validate_targets(plan_code, targets)
+    normalized_targets = validate_targets(plan_code, targets, business_date=_hong_kong_date(now))
     customer = connection.execute("SELECT * FROM customers WHERE email_normalized=?", (normalized_email,)).fetchone()
     if customer is not None and plan_code == "trial" and customer["trial_used_at"] is not None:
         raise ValueError("trial already used for this email")
-    if customer is None:
-        customer_id = int(connection.execute(
-            "INSERT INTO customers(email_normalized, created_at, consent_source) VALUES (?, ?, 'activation')",
-            (normalized_email, _datetime_to_text(now)),
-        ).lastrowid)
-    else:
-        customer_id = int(customer["id"])
-    reservation_expiry = now + verification_ttl
-    if row["status"] == "reserved" and row["reserved_customer_id"] != customer_id and (_datetime_from_text(row["reservation_expires_at"]) or now) > now:
-        raise ValueError("activation code is reserved")
-    connection.execute(
-        """UPDATE activation_codes SET status='reserved', reserved_at=?, reservation_expires_at=?,
-           reserved_customer_id=? WHERE id=?""",
-        (_datetime_to_text(now), _datetime_to_text(reservation_expiry), customer_id, row["id"]),
-    )
-    cursor = connection.execute(
-        """INSERT INTO email_verification_tokens(token_hash, activation_code_id, customer_id,
-           targets_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)""",
-        (f"pending:{secrets.token_hex(16)}", row["id"], customer_id, json.dumps(normalized_targets, separators=(",", ":")),
-         _datetime_to_text(now), _datetime_to_text(reservation_expiry)),
-    )
-    verification_id = int(cursor.lastrowid)
-    token = _signed_token(verification_id, purpose="verify", secret=signing_secret)
-    connection.execute("UPDATE email_verification_tokens SET token_hash=? WHERE id=?", (hash_secret(token), verification_id))
-    queue_notification(
-        connection, notification_kind="verify_email", dedup_key=f"verify_email:{verification_id}",
-        recipient_email=normalized_email,
-        payload={"base_url": base_url.rstrip("/"), "verification_id": verification_id}, created_at=now,
-    )
-    connection.commit()
-    return verification_id
+    connection.execute("SAVEPOINT begin_activation")
+    try:
+        if customer is None:
+            customer_id = int(connection.execute(
+                "INSERT INTO customers(email_normalized, created_at, consent_source) VALUES (?, ?, 'activation')",
+                (normalized_email, _datetime_to_text(now)),
+            ).lastrowid)
+        else:
+            customer_id = int(customer["id"])
+        reservation_expiry = now + verification_ttl
+        reserved = connection.execute(
+            """UPDATE activation_codes
+               SET status='reserved', reserved_at=?, reservation_expires_at=?, reserved_customer_id=?
+               WHERE id=? AND expires_at > ? AND (
+                   status='available' OR (
+                       status='reserved' AND (
+                           reserved_customer_id=? OR reservation_expires_at IS NULL OR reservation_expires_at <= ?
+                       )
+                   )
+               )""",
+            (_datetime_to_text(now), _datetime_to_text(reservation_expiry), customer_id, row["id"],
+             _datetime_to_text(now), customer_id, _datetime_to_text(now)),
+        )
+        if reserved.rowcount != 1:
+            raise ValueError("activation code is reserved")
+        cursor = connection.execute(
+            """INSERT INTO email_verification_tokens(token_hash, activation_code_id, customer_id,
+               targets_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)""",
+            (f"pending:{secrets.token_hex(16)}", row["id"], customer_id, json.dumps(normalized_targets, separators=(",", ":")),
+             _datetime_to_text(now), _datetime_to_text(reservation_expiry)),
+        )
+        verification_id = int(cursor.lastrowid)
+        token = _signed_token(verification_id, purpose="verify", secret=signing_secret)
+        connection.execute("UPDATE email_verification_tokens SET token_hash=? WHERE id=?", (hash_secret(token), verification_id))
+        queue_notification(
+            connection, notification_kind="verify_email", dedup_key=f"verify_email:{verification_id}",
+            recipient_email=normalized_email,
+            payload={"base_url": base_url.rstrip("/"), "verification_id": verification_id}, created_at=now,
+        )
+        connection.execute("RELEASE SAVEPOINT begin_activation")
+        connection.commit()
+        return verification_id
+    except BaseException:
+        connection.execute("ROLLBACK TO SAVEPOINT begin_activation")
+        connection.execute("RELEASE SAVEPOINT begin_activation")
+        raise
 
 
 def verification_token(verification_id: int, *, signing_secret: str) -> str:
@@ -172,15 +216,21 @@ def verification_token(verification_id: int, *, signing_secret: str) -> str:
 def verify_activation(connection: sqlite3.Connection, *, token: str, now: datetime) -> int:
     initialize_database(connection)
     row = connection.execute(
-        """SELECT v.*, a.plan_code, a.status AS code_status, a.expires_at AS code_expires_at
+        """SELECT v.*, a.plan_code, a.status AS code_status, a.expires_at AS code_expires_at,
+                  a.reserved_customer_id
            FROM email_verification_tokens v JOIN activation_codes a ON a.id=v.activation_code_id
            WHERE v.token_hash=?""", (hash_secret(token),),
     ).fetchone()
     if row is None or row["used_at"] is not None or row["code_status"] != "reserved":
         raise ValueError("verification token unavailable")
+    if row["reserved_customer_id"] != row["customer_id"]:
+        raise ValueError("verification token does not own activation code reservation")
     if (_datetime_from_text(row["expires_at"]) or now) <= now or (_datetime_from_text(row["code_expires_at"]) or now) <= now:
         raise ValueError("verification token expired")
     plan = PLANS[str(row["plan_code"])]
+    targets = validate_targets(
+        str(row["plan_code"]), json.loads(row["targets_json"]), business_date=_hong_kong_date(now)
+    )
     expires_at = now + plan.duration
     cursor = connection.execute(
         """INSERT INTO subscriptions(customer_id, plan_code, starts_at, activated_at,
@@ -189,7 +239,6 @@ def verify_activation(connection: sqlite3.Connection, *, token: str, now: dateti
          _datetime_to_text(expires_at), _datetime_to_text(expires_at), _datetime_to_text(now)),
     )
     subscription_id = int(cursor.lastrowid)
-    targets = json.loads(row["targets_json"])
     for target in targets:
         for office in target["offices"]:
             connection.execute(
@@ -234,6 +283,20 @@ def extend_zero_match_guarantees(connection: sqlite3.Connection, *, now: datetim
            AND first_matched_event_at IS NULL AND guarantee_extended_at IS NULL""",
         (_datetime_to_text(now),),
     ).fetchall():
+        filters = connection.execute(
+            "SELECT earliest_date, deadline FROM subscription_filters WHERE subscription_id=?",
+            (row["id"],),
+        ).fetchall()
+        try:
+            valid_targets = bool(filters) and all(
+                _parse_target_date(item["earliest_date"]) <= _parse_target_date(item["deadline"])
+                and _parse_target_date(item["deadline"]) >= _hong_kong_date(now)
+                for item in filters
+            )
+        except ValueError:
+            valid_targets = False
+        if not valid_targets:
+            continue
         new_expiry = (_datetime_from_text(row["expires_at"]) or now) + PLANS[row["plan_code"]].guarantee_extension  # type: ignore[operator]
         connection.execute("UPDATE subscriptions SET expires_at=?, guarantee_extended_at=? WHERE id=?",
                            (_datetime_to_text(new_expiry), _datetime_to_text(now), row["id"]))

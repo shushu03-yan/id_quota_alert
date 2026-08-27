@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 
+from .config import validate_token_signing_secret
 from .email_provider import EmailDeliveryResult, EmailProvider
 from .storage import _datetime_to_text, initialize_database, set_runtime_state
 
@@ -63,11 +64,12 @@ def match_quota_event(connection: sqlite3.Connection, event_id: int, *, now: dat
         JOIN subscription_filters AS f ON f.subscription_id = s.id
         WHERE s.active = 1 AND s.activated_at IS NOT NULL
           AND s.starts_at <= ? AND s.expires_at > ?
+          AND ? >= s.starts_at AND ? >= s.activated_at
           AND c.unsubscribed_at IS NULL
           AND f.earliest_date <= ? AND f.deadline >= ?
           AND (f.office_id = ? OR f.office_id = '*')
         """,
-        (_datetime_to_text(now), _datetime_to_text(now), event["quota_date"],
+        (_datetime_to_text(now), _datetime_to_text(now), event["observed_at"], event["observed_at"], event["quota_date"],
          event["quota_date"], event["office_id"]),
     ).fetchall()
     queued = 0
@@ -83,7 +85,7 @@ def match_quota_event(connection: sqlite3.Connection, event_id: int, *, now: dat
         now_text = _datetime_to_text(now)
         connection.execute(
             "UPDATE subscriptions SET first_matched_event_at = COALESCE(first_matched_event_at, ?) WHERE id = ?",
-            (now_text, row["subscription_id"]),
+            (event["observed_at"], row["subscription_id"]),
         )
         recipients = [str(x[0]) for x in connection.execute(
             "SELECT email_normalized FROM subscription_recipients WHERE subscription_id=? ORDER BY id",
@@ -180,9 +182,9 @@ def _message_for(item: ClaimedNotification) -> tuple[str, str]:
     if item.kind == "activation_test":
         return "你的 HKID Alert 已成功启动", str(item.payload.get("message", "这是一封服务启动确认邮件，不是实际配额提醒，不代表现在有预约名额。"))
     if item.kind == "verify_email":
-        secret = os.getenv("TOKEN_SIGNING_SECRET", "")
-        if not secret:
-            raise ValueError("TOKEN_SIGNING_SECRET is required to render secure links")
+        secret = validate_token_signing_secret(
+            os.getenv("TOKEN_SIGNING_SECRET", ""), app_env=os.getenv("APP_ENV", "development")
+        )
         record_id = int(item.payload["verification_id"])
         identifier = base64.urlsafe_b64encode(str(record_id).encode()).decode().rstrip("=")
         signature = hmac.new(secret.encode(), f"verify:{identifier}".encode(), hashlib.sha256).digest()
@@ -190,9 +192,9 @@ def _message_for(item: ClaimedNotification) -> tuple[str, str]:
         url = f"{str(item.payload['base_url']).rstrip('/')}/verify?token={token}"
         return "验证你的 HKID Alert 邮箱", f"请打开验证链接：{url}"
     if item.kind == "manage_link":
-        secret = os.getenv("TOKEN_SIGNING_SECRET", "")
-        if not secret:
-            raise ValueError("TOKEN_SIGNING_SECRET is required to render secure links")
+        secret = validate_token_signing_secret(
+            os.getenv("TOKEN_SIGNING_SECRET", ""), app_env=os.getenv("APP_ENV", "development")
+        )
         record_id = int(item.payload["magic_link_id"])
         identifier = base64.urlsafe_b64encode(str(record_id).encode()).decode().rstrip("=")
         signature = hmac.new(secret.encode(), f"manage:{identifier}".encode(), hashlib.sha256).digest()
