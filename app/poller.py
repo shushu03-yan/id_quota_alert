@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 import random
 import sqlite3
 import time
@@ -28,6 +29,7 @@ from .storage import (
 )
 
 
+logger = logging.getLogger(__name__)
 Clock = Callable[[], datetime]
 
 
@@ -259,5 +261,14 @@ class QuotaPoller:
                 max_backoff_seconds=max_backoff_seconds,
                 jitter_seconds=jitter_seconds,
                 jitter_fraction=random_fraction(),
+            )
+            logger.info(
+                "quota poll outcome=%s applied=%s duplicate=%s events=%d error=%s next_poll_in=%.1fs",
+                result.outcome.value,
+                result.snapshot_applied,
+                result.duplicate_snapshot,
+                result.events_created,
+                result.error_code or "-",
+                delay,
             )
             sleep(delay)
