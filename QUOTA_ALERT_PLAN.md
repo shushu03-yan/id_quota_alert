@@ -462,8 +462,17 @@ V1 价格和周期是试运营基准。积累足够真实数据后，根据转�
 2. **M1A：Source Safety**——真实数据源解析、observation、validation 与异常防护。
 3. **M1B：Event Core**——confirmed state、occurrence、event 与持久化。
 4. **M2：Email Notification**——激活测试邮件、outbox、重试、退订与延迟指标。
+
 5. **M3：Subscription Product**——Trial / Quick / Goal / Family 规则、预约目标、延期保障、CLI 和人工订单。
 6. **M4：Pilot**——少量真实用户试运营，收集转化率与首次匹配时间分布。
 7. **M5：Expansion Review**——根据真实需求决定 Telegram、在线支付、网页后台和数据库升级。
+
+### 当前工程状态（2026-08-28）
+
+- M1 Source / Poller 已有代码与自动测试；真实 3–7 天 soak：**NOT YET VALIDATED**。
+- M2 Matcher / 通用 Outbox / SMTP 开发 Provider / Email Worker 已代码完成并有自动测试；真实 Provider 与端到端投递：**NOT YET VALIDATED**。
+- M3 激活码、Email Verify、套餐限制、Trial、延期保障、Magic Link、最小 Web 路由已代码完成并有自动测试；真实用户流程：**NOT YET VALIDATED**。
+- SQLite 一致性 backup、rotation 和 systemd 模板已准备；restore / VPS / HTTPS / offsite backup：**NOT YET VALIDATED**。
+- 当前等级最多为 **developer test ready**；尚未达到 local pilot ready 或 paid production ready。
 
 当前阶段仍以 **正确检测公开配额 + 抗误报 + 可审计** 为最高优先级，不因套餐设计提前扩大技术复杂度。

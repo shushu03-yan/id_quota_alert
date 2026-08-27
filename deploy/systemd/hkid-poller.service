@@ -1,0 +1,19 @@
+[Unit]
+Description=HKID public quota shared poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hkid-alert
+Group=hkid-alert
+WorkingDirectory=/opt/hkid-quota-alert
+EnvironmentFile=/etc/hkid-quota-alert.env
+ExecStart=/opt/hkid-quota-alert/.venv/bin/python -m app poll
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

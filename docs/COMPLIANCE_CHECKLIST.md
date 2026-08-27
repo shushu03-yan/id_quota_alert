@@ -2,6 +2,18 @@
 
 > 本清单是项目上线门槛，不是法律意见。任何一项关键数据使用边界未确认时，不公开收费。
 
+## 工程证据状态（2026-08-28）
+
+- [x] 自动测试覆盖 Source Adapter、Poller、State、v1/v2→v3 migration、Matcher、Outbox、Email Worker、激活码、Email Verification、套餐限制、Trial、延期保障、Magic Link、退订、Web 路由、Backup 与 Health。
+- [x] 代码使用单一共享 Poller；没有实现自动预约、验证码/排队/限流绕过、账号密码系统或按套餐加速。
+- [x] activation / verification / magic token 数据库仅存 hash；SMTP 配置仅从环境变量读取。
+- [ ] 真实 3–7 天 soak test（NOT YET VALIDATED）。
+- [ ] 真实 Email Provider 测试及完整人工端到端链路（NOT YET VALIDATED）。
+- [ ] restart 与 backup restore 演练（NOT YET VALIDATED）。
+- [ ] 数据读取、第三方提醒、商业收费边界确认（NOT YET VALIDATED）。
+
+以下原始上线清单继续保持未勾选，只有获得对应真实证据后才可逐项确认。
+
 ## 数据来源与商业用途
 
 - [ ] 已向 GovHK / 入境事务处说明实际服务模式。

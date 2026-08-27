@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-项目当前处于 **M1：可靠事件核心**。M1A Source Adapter 与 M1B 单一共享 Poller / SQLite 持久化闭环已经有首版实现，下一步是进行 3–7 天真实连续运行验证。
+项目当前处于 **developer test ready**：M1 可靠事件核心以及 M2/M3 的本地工程实现已经具备自动测试，但真实 3–7 天 soak、真实 Email Provider、完整人工链路、重启和备份恢复演练均为 **NOT YET VALIDATED**。因此尚不属于 local pilot ready，更不属于 paid production ready。
 
 目前已经实现：
 
@@ -29,13 +29,20 @@
 - `runtime_state` 记录 `last_poll_attempt`、`last_poll_outcome`、`last_successful_poll`、`last_valid_snapshot`、`last_payload_hash`、`last_source_updated_at` 等运行信息。
 - SQLite schema、Source Adapter、状态机、Poller 重启/失败隔离/重复快照等自动测试。
 - GitHub Actions 在 Python 3.11 / 3.12 运行 pytest。
+- `health` 与 `soak-summary` 运维摘要；不足 3 天永远显示 `SOAK TEST NOT COMPLETE`，满 3 天也只提示人工复核，不自动宣称通过。
+- 通用 notification outbox（`verify_email / activation_test / quota_alert / manage_link`）、数据库去重键、lease recovery、1/5/15/60 分钟有界重试及 delivery audit。
+- Appointment Matcher：按有效期、办事处、日期、最低状态和退订状态匹配；一个 target 可包含多个 office。
+- SMTP 开发 Provider 抽象、Email Worker，以及首次匹配/入队/Provider 接受指标。
+- 随机一次性激活码（仅存 hash）、Email 验证（仅存 token hash）、激活确认邮件、Trial 每邮箱一次、套餐目标/邮箱上限和 Goal/Family 0-match 一次性延期。
+- 短期一次性 Magic Link、目标查看/修改和退订 Web MVP。
+- SQLite 官方 backup API 一致性备份与保留轮换，以及非 root systemd 模板。
 
 目前 **尚未完成**：
 
 - 3–7 天真实连续运行 soak test；因此还不能据此宣称 Poller 已达到生产稳定性。
-- Email 投递 worker 与真实测试邮件。
-- Appointment Matcher、激活码、Email Verify / Magic Link、自助激活页。
-- 多用户 CLI 管理流程。
+- 真实 SMTP / 正式 Email Provider 投递验证。
+- activation → verify → activation email → quota alert 的真实人工端到端验证。
+- 备份 restore 演练、进程重启演练、VPS/HTTPS/外部监控与 offsite backup。
 - 公开收费、注册、支付或用户后台。
 
 因此当前仓库仍不可直接作为生产收费服务运行。
@@ -174,6 +181,25 @@ python -m app poll --once
 python -m app poll
 ```
 
+检查运行状态和真实 soak 窗口：
+
+```powershell
+python -m app health
+python -m app soak-summary
+```
+
+开发环境 Email Worker、激活码、Web 与一致性备份：
+
+```powershell
+python -m app activation-code create --plan goal
+python -m app activation-code list
+python -m app email-worker
+python -m app web --host 127.0.0.1 --port 8080
+python -m app backup --retain 30
+```
+
+SMTP 密钥、`TOKEN_SIGNING_SECRET` 和公开 URL 只从进程环境读取。`.env.example` 仅含占位值；服务不会把 SMTP 密码、激活码明文、验证 token 或 Magic Link token 写入数据库或普通日志。
+
 连续运行前请先阅读 [`docs/LOCAL_SOAK_TEST.md`](docs/LOCAL_SOAK_TEST.md)。默认 Poller 配置只是当前工程测试基准，不代表已经获得来源方对某一具体轮询频率、第三方提醒或商业用途的许可。
 
 Python 要求：**3.11+**。
@@ -191,6 +217,12 @@ id_quota_alert/
 │   ├── observations.py
 │   ├── events.py
 │   ├── poller.py
+│   ├── reporting.py
+│   ├── notifications.py
+│   ├── email_provider.py
+│   ├── lifecycle.py
+│   ├── web.py
+│   ├── backup.py
 │   └── storage.py
 ├── tests/
 │   ├── test_project_skeleton.py
@@ -206,7 +238,7 @@ id_quota_alert/
 └── QUOTA_ALERT_PLAN.md
 ```
 
-后续的 `matcher.py`、`notifier.py`、`scheduler.py` 与完整 `cli.py` 会在对应里程碑再加入，不提前制造复杂度。
+部署准备文件位于 `deploy/systemd/`。这些模板不包含密钥，也不代表已经完成 VPS、HTTPS、监控或生产验证。
 
 ## 数据来源
 

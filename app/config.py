@@ -12,6 +12,18 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
+TOKEN_SIGNING_SECRET_PLACEHOLDER = "replace-with-at-least-32-random-characters"
+
+
+def validate_token_signing_secret(secret: str, *, app_env: str) -> str:
+    """Reject weak or known example signing secrets outside development."""
+    if len(secret) < 32:
+        raise ValueError("TOKEN_SIGNING_SECRET must contain at least 32 characters")
+    if app_env.strip().casefold() != "development" and secret == TOKEN_SIGNING_SECRET_PLACEHOLDER:
+        raise ValueError("TOKEN_SIGNING_SECRET must not use the example placeholder outside development")
+    return secret
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     app_env: str = "development"

@@ -35,7 +35,7 @@ def test_schema_contains_observation_state_event_and_outbox_tables(tmp_path) -> 
         "orders",
     }.issubset(tables)
 
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_v1_product_fields_are_present(tmp_path) -> None:
@@ -152,7 +152,7 @@ def test_outbox_deduplication_is_enforced_by_database(tmp_path) -> None:
         )
 
 
-def test_v1_database_can_be_upgraded_to_v2(tmp_path) -> None:
+def test_v1_database_can_be_upgraded_to_current_schema(tmp_path) -> None:
     path = tmp_path / "legacy.sqlite3"
     connection = connect_database(path)
 
@@ -189,7 +189,48 @@ def test_v1_database_can_be_upgraded_to_v2(tmp_path) -> None:
 
     initialize_database(connection)
 
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     assert "trial_used_at" in _columns(connection, "customers")
     assert "guarantee_extended_at" in _columns(connection, "subscriptions")
     assert "target_key" in _columns(connection, "subscription_filters")
+
+
+def test_v2_outbox_is_migrated_without_losing_rows_or_attempts(tmp_path) -> None:
+    connection = connect_database(tmp_path / "legacy-v2.sqlite3")
+    connection.executescript(
+        """
+        CREATE TABLE customers(id INTEGER PRIMARY KEY, email_normalized TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL, unsubscribed_at TEXT, consent_source TEXT NOT NULL, trial_used_at TEXT);
+        CREATE TABLE subscriptions(id INTEGER PRIMARY KEY, customer_id INTEGER NOT NULL REFERENCES customers(id),
+            plan_code TEXT NOT NULL, starts_at TEXT NOT NULL, activated_at TEXT, original_expires_at TEXT,
+            expires_at TEXT NOT NULL, active INTEGER NOT NULL, guarantee_extended_at TEXT,
+            first_matched_event_at TEXT, first_notification_queued_at TEXT, first_provider_accepted_at TEXT,
+            created_at TEXT NOT NULL);
+        CREATE TABLE quota_events(id INTEGER PRIMARY KEY, quota_date TEXT NOT NULL, office_id TEXT NOT NULL,
+            from_status TEXT NOT NULL, to_status TEXT NOT NULL, occurrence_id TEXT NOT NULL,
+            observed_at TEXT NOT NULL, source_updated_at TEXT, created_at TEXT NOT NULL,
+            UNIQUE(quota_date,office_id,occurrence_id,to_status));
+        CREATE TABLE notification_outbox(id INTEGER PRIMARY KEY, subscription_id INTEGER NOT NULL REFERENCES subscriptions(id),
+            quota_event_id INTEGER NOT NULL REFERENCES quota_events(id), channel TEXT NOT NULL, status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, locked_at TEXT, locked_by TEXT,
+            lock_expires_at TEXT, provider_message_id TEXT, created_at TEXT NOT NULL, sent_at TEXT,
+            UNIQUE(subscription_id,quota_event_id,channel));
+        CREATE TABLE delivery_attempts(id INTEGER PRIMARY KEY, outbox_id INTEGER NOT NULL REFERENCES notification_outbox(id),
+            attempted_at TEXT NOT NULL, provider_message_id TEXT, result TEXT NOT NULL, error_code TEXT);
+        INSERT INTO customers VALUES (1,'legacy@example.com','2026-08-27T00:00:00Z',NULL,'test',NULL);
+        INSERT INTO subscriptions VALUES (1,1,'goal','2026-08-27T00:00:00Z','2026-08-27T00:00:00Z',
+            '2026-09-10T00:00:00Z','2026-09-10T00:00:00Z',1,NULL,NULL,NULL,NULL,'2026-08-27T00:00:00Z');
+        INSERT INTO quota_events VALUES (1,'2026-09-01','office-a','unavailable','available','occ-1',
+            '2026-08-27T01:00:00Z',NULL,'2026-08-27T01:00:00Z');
+        INSERT INTO notification_outbox VALUES (1,1,1,'email','pending',1,NULL,NULL,NULL,NULL,NULL,'2026-08-27T01:00:00Z',NULL);
+        INSERT INTO delivery_attempts VALUES (1,1,'2026-08-27T01:01:00Z',NULL,'retryable_failure','timeout');
+        PRAGMA user_version=2;
+        """
+    )
+    connection.commit()
+    initialize_database(connection)
+    row = connection.execute("SELECT notification_kind,dedup_key,recipient_email,attempt_count FROM notification_outbox").fetchone()
+    assert tuple(row) == ("quota_alert", "legacy:quota_alert:1:1:email", "legacy@example.com", 1)
+    assert connection.execute("SELECT result,error_code FROM delivery_attempts").fetchone()[:] == ("retryable_failure", "timeout")
+    initialize_database(connection)
+    assert connection.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 1
