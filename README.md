@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-项目已从纯 M0 规划进入 **M1：可靠事件核心**，其中 M1A Source Adapter 已有首版实现。
+项目当前处于 **M1：可靠事件核心**。M1A Source Adapter 与 M1B 单一共享 Poller / SQLite 持久化闭环已经有首版实现，下一步是进行 3–7 天真实连续运行验证。
 
 目前已经实现：
 
@@ -15,26 +15,30 @@
 - `quota_observations` 审计模型：获取失败、解析失败与配额状态严格分离。
 - GovHK / 入境事务处公开配额 `getSituation` Source Adapter（默认 `svcId=579`）。
 - Source Adapter 对 timeout、403、429、5xx、空响应、非法 JSON、未知状态值和 source 更新时间倒退进行失败分类。
-- `office[] × date` 完整性检查：部分办事处数据缺失时拒绝快照，不把缺失误判为名额消失。
+- `office[] × date` 一致性检查：对响应中出现的日期，缺少预期办事处数据时拒绝快照，不把部分响应误判为名额消失。
 - `quotaR / quotaK` 解析与聚合：`quota-g -> available`、`quota-y -> limited`、`quota-r / no-quota* -> unavailable`，并保留当前有名额的 `R / K` 时段标签。
 - Confirmed State 状态机。
 - 连续缺失确认机制：单次缺失不会直接关闭现有名额 occurrence。
 - `occurrence_id`：支持“消失后再次出现”生成新事件。
-- 初始基线模式：服务首次启动时记录当前状态但不发送历史提醒。
-- SQLite 初始 schema。
-- `notification_outbox` 数据库级唯一约束，避免同一事件重复创建通知。
-- Outbox lease 字段，为 worker 崩溃后的安全重试预留基础。
-- 核心状态机、Source Adapter 与 SQLite 约束测试。
+- 初始基线模式：服务首次成功快照只记录当前状态，不发送历史提醒。
+- 单一共享 `QuotaPoller`：所有用户共用一份来源数据，不按用户增加来源请求频率。
+- Poller 将 observation、confirmed state、quota event 持久化到 SQLite，并保留 `R / K` service periods。
+- 成功快照通过 payload hash 去重；重复 payload 仍记录成功 observation / health 时间，但不重复跑状态机。
+- Poller 重启后从 SQLite 恢复 baseline、confirmed state 与 source 更新时间。
+- 连续失败采用有上限的指数退避；jitter 只增加等待时间，不制造更高请求频率。
+- `runtime_state` 记录 `last_poll_attempt`、`last_poll_outcome`、`last_successful_poll`、`last_valid_snapshot`、`last_payload_hash`、`last_source_updated_at` 等运行信息。
+- SQLite schema、Source Adapter、状态机、Poller 重启/失败隔离/重复快照等自动测试。
+- GitHub Actions 在 Python 3.11 / 3.12 运行 pytest。
 
-目前 **尚未实现**：
+目前 **尚未完成**：
 
-- 定时 Poller、退避/jitter 与 3–7 天连续真实运行验证。
-- Observation / Snapshot / Confirmed State 的完整 Poller 持久化编排。
-- Email 投递 worker。
+- 3–7 天真实连续运行 soak test；因此还不能据此宣称 Poller 已达到生产稳定性。
+- Email 投递 worker 与真实测试邮件。
+- Appointment Matcher、激活码、Email Verify / Magic Link、自助激活页。
 - 多用户 CLI 管理流程。
 - 公开收费、注册、支付或用户后台。
 
-因此当前仓库仍不可直接作为生产服务运行。
+因此当前仓库仍不可直接作为生产收费服务运行。
 
 ## 产品定位
 
@@ -142,6 +146,79 @@ Notification Outbox
 
 第一份成功快照作为 baseline，只建立当前 confirmed state。只有之后真正发生的新出现或状态升级才创建提醒事件。
 
+## 本地开发与 Poller
+
+```powershell
+Copy-Item .env.example .env
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m pytest
+```
+
+默认运行不会发送网络请求：
+
+```powershell
+python -m app
+```
+
+显式执行一次真实公开配额 observation：
+
+```powershell
+python -m app poll --once
+```
+
+连续运行共享 Poller：
+
+```powershell
+python -m app poll
+```
+
+连续运行前请先阅读 [`docs/LOCAL_SOAK_TEST.md`](docs/LOCAL_SOAK_TEST.md)。默认 Poller 配置只是当前工程测试基准，不代表已经获得来源方对某一具体轮询频率、第三方提醒或商业用途的许可。
+
+Python 要求：**3.11+**。
+
+## 当前代码结构
+
+```text
+id_quota_alert/
+├── app/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── config.py
+│   ├── source.py
+│   ├── quota.py
+│   ├── observations.py
+│   ├── events.py
+│   ├── poller.py
+│   └── storage.py
+├── tests/
+│   ├── test_project_skeleton.py
+│   ├── test_quota_core.py
+│   ├── test_source_adapter.py
+│   ├── test_poller.py
+│   └── test_storage_schema.py
+├── docs/
+│   ├── COMPLIANCE_CHECKLIST.md
+│   └── LOCAL_SOAK_TEST.md
+├── .env.example
+├── pyproject.toml
+└── QUOTA_ALERT_PLAN.md
+```
+
+后续的 `matcher.py`、`notifier.py`、`scheduler.py` 与完整 `cli.py` 会在对应里程碑再加入，不提前制造复杂度。
+
+## 数据来源
+
+计划只使用获准的 GovHK / 入境事务处公开配额信息：
+
+- [GovHK 人事登记办事处预约配额预览](https://www.gov.hk/tc/apps/bookidcardquota.htm)
+- [入境事务处公开配额预览](https://eservices.es2.immd.gov.hk/es/quota-enquiry-client/?l=zh-CN&appId=579)
+- Source Adapter 当前读取该预览所使用的公开 `getSituation` JSON 数据（`svcId=579`）。
+- [网上预约申领香港智能身份证](https://www.immd.gov.hk/hkt/hkid.html)
+
+实际预约情况始终以官方系统为准。Source Adapter / Poller 的实现不代表已经完成上线前的数据使用、自动读取频率或商业用途确认。
+
 ## V1 要采集的产品指标
 
 为了以后决定 14 天是否应该缩短为 7 天或其他周期，订阅至少记录：
@@ -158,63 +235,12 @@ Notification Outbox
 - Detect / Queue / Provider latency；
 - Goal / Family 延长保障触发率。
 
-## 本地开发
-
-```powershell
-Copy-Item .env.example .env
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-python -m pytest
-python -m app
-```
-
-Python 要求：**3.11+**。
-
-## 当前代码结构
-
-```text
-id_quota_alert/
-├── app/
-│   ├── __init__.py
-│   ├── __main__.py
-│   ├── config.py
-│   ├── source.py
-│   ├── quota.py
-│   ├── observations.py
-│   ├── events.py
-│   └── storage.py
-├── tests/
-│   ├── test_project_skeleton.py
-│   ├── test_quota_core.py
-│   ├── test_source_adapter.py
-│   └── test_storage_schema.py
-├── docs/
-│   └── COMPLIANCE_CHECKLIST.md
-├── .env.example
-├── pyproject.toml
-└── QUOTA_ALERT_PLAN.md
-```
-
-后续的 `poller.py`、`matcher.py`、`notifier.py`、`scheduler.py` 与 `cli.py` 会在对应里程碑再加入，不提前制造复杂度。
-
-## 数据来源
-
-计划只使用获准的 GovHK / 入境事务处公开配额信息：
-
-- [GovHK 人事登记办事处预约配额预览](https://www.gov.hk/tc/apps/bookidcardquota.htm)
-- [入境事务处公开配额预览](https://eservices.es2.immd.gov.hk/es/quota-enquiry-client/?l=zh-CN&appId=579)
-- Source Adapter 当前读取该预览所使用的公开 `getSituation` JSON 数据（`svcId=579`）。
-- [网上预约申领香港智能身份证](https://www.immd.gov.hk/hkt/hkid.html)
-
-实际预约情况始终以官方系统为准。Source Adapter 的实现不代表已经完成上线前的数据使用/商业用途确认。
-
 ## 上线前要求
 
 公开收费前必须完成：
 
 1. 确认公开配额数据的自动读取、第三方提醒及商业使用边界。
-2. 对真实 Source Adapter 完成连续运行验证，确认结构变化和异常响应不会制造假事件。
+2. 对真实 Source Adapter + Poller 完成 3–7 天连续运行验证，确认结构变化、网络异常和来源异常不会制造假事件。
 3. 完成 Email outbox、重试、退订、激活测试邮件和延迟监控。
 4. 完成 Trial 一次性限制、预约目标数量限制和延长保障逻辑测试。
 5. 完成隐私声明、服务条款、退款规则和免责声明。
