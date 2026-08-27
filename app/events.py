@@ -23,6 +23,7 @@ class QuotaState:
     first_observed_at: datetime
     last_observed_at: datetime
     source_updated_at: datetime | None
+    service_periods: tuple[str, ...] = ()
     missing_count: int = 0
 
 
@@ -58,6 +59,7 @@ def _state_from_entry(
         first_observed_at=snapshot.observed_at,
         last_observed_at=snapshot.observed_at,
         source_updated_at=snapshot.source_updated_at,
+        service_periods=entry.service_periods,
         missing_count=0,
     )
 
@@ -94,6 +96,7 @@ def reconcile_snapshot(
                     previous,
                     last_observed_at=snapshot.observed_at,
                     source_updated_at=snapshot.source_updated_at,
+                    service_periods=entry.service_periods,
                     missing_count=0,
                 )
             else:
@@ -124,6 +127,7 @@ def reconcile_snapshot(
             first_observed_at=previous.first_observed_at,
             last_observed_at=snapshot.observed_at,
             source_updated_at=snapshot.source_updated_at,
+            service_periods=entry.service_periods,
             missing_count=0,
         )
 
@@ -156,6 +160,7 @@ def reconcile_snapshot(
                 first_observed_at=snapshot.observed_at,
                 last_observed_at=previous.last_observed_at,
                 source_updated_at=previous.source_updated_at,
+                service_periods=(),
                 missing_count=0,
             )
         else:
