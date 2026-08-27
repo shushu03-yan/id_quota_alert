@@ -1,0 +1,13 @@
+[Unit]
+Description=HKID Alert one-shot subscription maintenance
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hkid-alert
+Group=hkid-alert
+WorkingDirectory=/opt/hkid-quota-alert
+EnvironmentFile=/etc/hkid-quota-alert.env
+ExecStart=/opt/hkid-quota-alert/.venv/bin/python -m app maintenance
+NoNewPrivileges=true
+PrivateTmp=true
