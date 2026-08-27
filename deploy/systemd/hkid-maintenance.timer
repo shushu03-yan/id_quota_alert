@@ -1,0 +1,11 @@
+[Unit]
+Description=Run HKID Alert subscription maintenance hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=hkid-maintenance.service
+
+[Install]
+WantedBy=timers.target
