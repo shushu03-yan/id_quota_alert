@@ -2,7 +2,9 @@
 
 ## 1. 项目定位
 
-本项目提供 **HKID 公开预约配额变化提醒**。服务读取获准使用的 GovHK / 入境事务处公开配额信息，在平台识别到符合用户筛选条件的新事件后发送通知；用户仍需自行进入官方系统预约。
+本项目提供 **HKID 公开预约配额变化提醒**。服务读取获准使用的 GovHK / 入境事务处公开配额信息，在平台识别到符合用户预约目标的新事件后发送通知；用户仍需自行进入官方系统预约。
+
+项目不是“代抢服务”或“自动预约工具”。产品价值是：**帮助普通用户及时知道公开名额变化，减少反复手动刷新网页的时间成本**。
 
 项目边界：
 
@@ -12,13 +14,135 @@
 - 不保存 HKID、旅行证件号码、出生日期、签证编号或查询代码。
 - 不承诺提醒绝对实时、邮件必达、数据绝对准确或预约一定成功。
 - 不冒充或暗示与香港政府、入境事务处存在隶属关系。
-- 不以更高官网轮询频率作为收费卖点。
-
-产品价值是“帮助普通用户及时知道公开名额变化”，而不是成为另一种抢号脚本。
+- 不以更高官网轮询频率、优先队列或“更快抢号”作为收费卖点。
 
 ---
 
-## 2. MVP 原则
+## 2. 产品模型：任务型服务，而非长期 SaaS
+
+HKID 预约提醒属于典型的 **单次任务型产品（task-oriented utility）**。用户购买的不是“一个月的软件订阅”，而是希望在近期完成一次预约任务。
+
+因此 V1 套餐设计遵循：
+
+1. 服务周期保持短，不设置 30 天主力订阅。
+2. 所有套餐共享同一份配额采集结果和同一条通知链路，通知速度不分等级。
+3. 套餐主要通过 **服务周期、预约目标数量、接收邮箱数量、是否享受无匹配提醒延长保障** 区分。
+4. 前台使用“预约目标”而不是“规则组 / ruleset”等技术术语。
+5. Family 的价值来自多人协同，不来自更长服务期或更高抓取频率。
+
+---
+
+## 3. V1 套餐矩阵
+
+V1 对中国内地用户测试阶段使用人民币（CNY / RMB）定价。价格是当前试运营基准，可根据真实数据调整。
+
+| 维度 | 🌱 1 日体验 Trial | ⚡ 3 日快速 Quick | 🎯 14 日目标 Goal | 👨‍👩‍👧 Family（隐藏/手动） |
+|---|---:|---:|---:|---:|
+| 价格 | **¥6** | **¥18** | **¥59** | **¥99** |
+| 服务周期 | 24 小时 | 3 天 | 14 天 | 14 天 |
+| 预约目标 | 1 个简单目标 | 最多 3 个 | 最多 6 个 | 最多 10 个 |
+| 日期筛选 | 简化 | 完整 | 完整 | 完整 |
+| 地点筛选 | 1 个办事处或全部 | 自由选择 | 自由选择 | 自由选择 |
+| 名额状态 | 基础 | 可设置 | 可设置 | 可设置 |
+| 接收邮箱 | 1 个 | 1 个 | 1 个 | 最多 3 个 |
+| 配额事件提醒链路 | 相同 | 相同 | 相同 | 相同 |
+| 激活测试邮件 | 有 | 有 | 有 | 有 |
+| 无匹配提醒延长保障 | 无 | 无 | **自动 +7 天，最多一次** | **自动 +7 天，最多一次** |
+
+### 3.1 公开销售策略
+
+V1 产品页只公开三个个人套餐：
+
+- ¥6 / 1 日体验
+- ¥18 / 3 日快速
+- ¥59 / 14 日目标（主推）
+
+Family 暂不在 V1 产品页公开展示。数据模型和 CLI 可预留支持；如果用户主动咨询多人同时接收提醒，可由管理员以 ¥99 手动开通。积累至少 3–5 个真实 Family 需求后，再决定是否正式上架。
+
+---
+
+## 4. “预约目标”的定义
+
+用户侧统一使用 **预约目标（Appointment Target）**，后台可以使用 `target` / `ruleset` 等技术名称。
+
+一个预约目标由以下条件组成：
+
+```text
+日期范围
++ 可接受的办事处集合
++ 最低提醒状态（limited / available）
+```
+
+例如：
+
+```text
+目标 A
+9/1–9/10
+沙田 / 火炭
+少量名额及以上
+
+目标 B
+9/1–9/15
+所有办事处
+仅 available
+```
+
+“最多 3 个 / 6 个目标”限制的是 **不同策略组合的数量**，不是限制单个目标内部只能选择一个办事处。
+
+### 4.1 Trial 的简单目标
+
+1 日体验只允许一个简单目标，建议限制为：
+
+- 一个日期范围；
+- 选择 1 个具体办事处，或选择全部办事处；
+- 一个最低状态。
+
+Trial 不允许创建多个互相独立的时间 × 地点策略组合。
+
+---
+
+## 5. 1 日体验的目的与限制
+
+1 日体验的核心目的不是靠 ¥6 获利，而是帮助第一次接触产品的用户验证：
+
+- 服务真实存在；
+- 邮箱配置正确；
+- 邮件能够投递；
+- 系统会在出现符合目标的新事件时发送提醒。
+
+### 5.1 激活测试邮件
+
+订阅激活后立即发送一封 **激活测试邮件**。测试邮件只验证邮件链路，不代表当前存在预约名额，也不能伪装成真实配额提醒。
+
+这样即使 24 小时内没有真实 quota event，用户仍然能确认邮件服务本身可用。
+
+### 5.2 Trial 仅限一次
+
+1 日体验每个邮箱只允许使用一次。
+
+数据库应通过 `customers.trial_used_at` 或订单历史判断是否已使用 Trial。MVP 不为了防止少量重复试用而收集手机号、设备指纹、HKID 或其他额外个人信息。
+
+---
+
+## 6. 无匹配提醒延长保障
+
+Goal 与 Family 包含一次 **无匹配提醒延长保障**：
+
+> 如果原服务期内，系统没有检测到任何符合该订阅有效预约目标的 quota event，则自动免费延长 7 天。
+
+关键定义：
+
+- 判断依据是系统是否产生 **有效匹配事件**，不是用户是否最终预约成功。
+- 每个订单最多自动延长一次。
+- 延长不承诺未来一定出现名额。
+- 已过期日期、无效日期或明显无法成立的预约目标不应被用于触发保障。
+- 保障触发后记录 `guarantee_extended_at`，避免重复延长。
+
+不要使用“未成功延期”“保证抢到”“目标必达”等可能被理解为预约成功承诺的表述。
+
+---
+
+## 7. MVP 技术范围
 
 第一版刻意保持小型：
 
@@ -26,11 +150,11 @@
 - 配额 observation、validation、confirmed state 与 event engine。
 - SQLite 本地存储。
 - Email 通知。
-- 用户邮箱、订阅期限和筛选条件。
-- 日期范围、办事处、最低状态筛选。
+- 用户邮箱、订阅期限和预约目标。
 - Outbox、失败重试、去重、投递审计。
+- 激活测试邮件。
 - 一键退订和到期自动停用。
-- CLI 管理用户、订阅和人工订单。
+- CLI 管理用户、订阅、预约目标和人工订单。
 - 基础健康检查、备份与延迟指标。
 
 第一版明确不做：
@@ -43,11 +167,9 @@
 - 免费版每日摘要等第二套调度逻辑。
 - Redis、Celery、RabbitMQ、Kubernetes 等与当前规模不匹配的组件。
 
-试用用户与付费用户使用同一条事件通知链路，只通过服务期限和筛选数量区分，避免为了“免费版”额外维护一套摘要系统。
-
 ---
 
-## 3. 核心架构
+## 8. 核心架构
 
 ```text
 GovHK / 入境事务处公开配额
@@ -62,11 +184,13 @@ GovHK / 入境事务处公开配额
               ↓
           Quota Event
               ↓
-      Subscription Matcher
+      Appointment Matcher
               ↓
      Notification Outbox
               ↓
          Email Worker
+              ↓
+             用户
 ```
 
 关键原则：
@@ -76,25 +200,24 @@ GovHK / 入境事务处公开配额
 3. 网络失败、解析失败和数据异常不能直接改变配额状态。
 4. 只有通过 validation 的 snapshot 才允许进入 confirmed-state engine。
 5. 配额事件与通知事件分离，便于审计、重试和去重。
-6. 数据库时间统一保存 UTC；面向用户的业务时间使用 `Asia/Hong_Kong`。
+6. 所有套餐在 quota event 产生后使用同一通知链路，不设置付费优先队列。
+7. 数据库时间统一保存 UTC；面向用户的业务时间使用 `Asia/Hong_Kong`。
 
 ---
 
-## 4. Observation 与 Snapshot Validation
-
-### 4.1 为什么需要 Observation 层
+## 9. Observation 与 Snapshot Validation
 
 以下情况都不能被解释为“没有名额”：
 
-- HTTP timeout。
-- 非 2xx 响应。
-- 返回空 HTML / 空 JSON。
-- 页面结构变化。
-- parser 抛错。
-- 只返回部分办事处或日期。
+- HTTP timeout；
+- 非 2xx 响应；
+- 返回空 HTML / 空 JSON；
+- 页面结构变化；
+- parser 抛错；
+- 只返回部分办事处或日期；
 - source 更新时间异常倒退。
 
-因此每次采集先生成 observation：
+每次采集先生成 observation：
 
 ```text
 success
@@ -105,7 +228,7 @@ rejected
 
 失败 observation 只用于审计和健康检查，不进入状态机。
 
-### 4.2 成功快照至少记录
+成功快照至少记录：
 
 - `observed_at`
 - `source_updated_at`
@@ -114,21 +237,19 @@ rejected
 - `office_count`
 - `quota_count`
 
-Source adapter 在已知正常覆盖范围时应提供 `expected_keys` 或等价完整性检查；缺少预期 key 的 snapshot 应被拒绝，而不是被解释为配额消失。
-
-不要求 MVP 保存完整网页正文；优先保存最小审计元数据，降低数据和隐私风险。
+Source adapter 在已知正常覆盖范围时应提供 `expected_keys` 或等价完整性检查。缺少预期 key 的 snapshot 应被拒绝，而不是被解释为配额消失。
 
 ---
 
-## 5. Confirmed State 与抗误报
+## 10. Confirmed State 与抗误报
 
-每个 `date + office_id` 维护状态：
+每个 `date + office_id` 维护：
 
 - `unavailable`
 - `limited`
 - `available`
 
-通知事件包括：
+可产生提醒的变化包括：
 
 - `unavailable -> limited`
 - `unavailable -> available`
@@ -137,312 +258,179 @@ Source adapter 在已知正常覆盖范围时应提供 `expected_keys` 或等价
 
 下降状态用于维护 confirmed state，但不产生“有名额”提醒。
 
-### 5.1 连续缺失确认
-
-一次成功 snapshot 中没有看到某个此前活跃的 key，不立刻关闭 occurrence。
-
-默认规则：
+### 10.1 连续缺失确认
 
 ```text
 第一次在有效快照中缺失
 → missing_count = 1
-→ 仍保留原 confirmed state
+→ 保留原 confirmed state
 
 第二次连续在有效快照中缺失
 → confirmed unavailable
 → 当前 occurrence 关闭
 ```
 
-默认 `MISSING_CONFIRMATIONS_REQUIRED=2`，后续根据真实来源更新行为调整。
+默认 `MISSING_CONFIRMATIONS_REQUIRED=2`。Fetch / parse / validation failure **不增加** `missing_count`。
 
-Fetch / parse / validation failure **不增加** `missing_count`。
+### 10.2 occurrence_id
 
-### 5.2 occurrence_id
+每次从 confirmed `unavailable` 进入 `limited / available` 时生成新的 `occurrence_id`，用于正确处理“消失后再次出现”。
 
-每次从 confirmed `unavailable` 进入 `limited/available` 时生成新的 `occurrence_id`。
+### 10.3 首次启动 baseline
 
-这样可以区分：
-
-```text
-available
-→ confirmed unavailable
-→ available
-```
-
-第二次出现必须是新的 occurrence，而不是被旧通知去重掉。
-
-### 5.3 首次启动 baseline
-
-服务第一次获得有效 snapshot 时：
-
-- 建立 confirmed state。
-- 记录已有 active occurrence。
-- 不生成历史提醒事件。
-
-只有 baseline 之后真正出现的新名额或状态升级才产生 quota event，避免部署或重启后把当前所有名额当成“刚出现”。
-
-生产实现需要把 baseline 已完成状态持久化到 `runtime_state`，不能只存在进程内存里。
+第一份有效 snapshot 只建立当前 confirmed state，不生成历史提醒。只有 baseline 之后真正出现的新名额或状态升级才产生 quota event。
 
 ---
 
-## 6. 数据模型
-
-### runtime_state
-
-保存少量服务级状态，例如：
-
-- baseline 是否完成
-- 最后成功 observation 时间
-- schema / parser 版本辅助信息
-
-### quota_observations
-
-- `id`
-- `observed_at`
-- `outcome`
-- `source_updated_at`
-- `payload_hash`
-- `parser_version`
-- `office_count`
-- `quota_count`
-- `error_code`
-
-### quota_state
-
-- `quota_date`
-- `office_id`
-- `status`
-- `service_periods_json`
-- `occurrence_id`
-- `first_observed_at`
-- `last_observed_at`
-- `source_updated_at`
-- `missing_count`
-
-主键：
-
-```text
-quota_date + office_id
-```
-
-### quota_events
-
-- `id`
-- `quota_date`
-- `office_id`
-- `from_status`
-- `to_status`
-- `occurrence_id`
-- `observed_at`
-- `source_updated_at`
-- `created_at`
-
-数据库层避免同一 occurrence 的同一升级事件被重复插入。
+## 11. 数据模型
 
 ### customers
+
+至少保存：
 
 - `id`
 - `email_normalized`
 - `created_at`
 - `unsubscribed_at`
 - `consent_source`
+- `trial_used_at`
 
 ### subscriptions
+
+至少保存：
 
 - `id`
 - `customer_id`
 - `plan_code`
 - `starts_at`
+- `activated_at`
+- `original_expires_at`
 - `expires_at`
 - `active`
+- `guarantee_extended_at`
+- `first_matched_event_at`
+- `first_notification_queued_at`
+- `first_provider_accepted_at`
 - `created_at`
 
-### subscription_filters
+其中：
 
-- `subscription_id`
-- `earliest_date`
-- `deadline`
-- `office_id`
-- `minimum_status`
+- `activated_at` 用于计算用户从激活到首次匹配的等待时间；
+- `first_matched_event_at` 反映产品层面的首次有效机会；
+- `first_notification_queued_at` 与 `first_provider_accepted_at` 用于拆分通知链路延迟；
+- `original_expires_at` 用于判断无匹配保障的原始服务期；
+- `guarantee_extended_at` 为空表示尚未使用自动延长。
+
+### subscription_filters / appointment targets
+
+V1 可以在现有 `subscription_filters` 基础上增加 `target_key`，使多行筛选记录属于同一个预约目标。一个 `target_key` 可以对应多个 `office_id`，但共享相同日期范围和最低状态。
+
+### quota_observations / quota_state / quota_events
+
+继续保持 observation、confirmed state 与 event 分离，避免来源异常直接制造通知。
 
 ### notification_outbox
 
-- `id`
-- `subscription_id`
-- `quota_event_id`
-- `channel`
-- `status` (`pending/sending/sent/failed/cancelled`)
-- `attempt_count`
-- `next_attempt_at`
-- `locked_at`
-- `locked_by`
-- `lock_expires_at`
-- `provider_message_id`
-- `created_at`
-- `sent_at`
-
-数据库唯一键：
+通知去重键仍由数据库强制保证：
 
 ```text
 subscription_id + quota_event_id + channel
 ```
 
-必须由数据库 `UNIQUE` 强制执行，不能只依赖 Python 的 `if not exists`。
-
-### delivery_attempts
-
-- `outbox_id`
-- `attempted_at`
-- `provider_message_id`
-- `result`
-- `error_code`
+Worker 使用 expiring lease，崩溃后可恢复任务。
 
 ### orders
 
-人工收款阶段也保留最小订单记录：
+人工收款阶段保留：
 
 - `id`
 - `customer_id`
 - `plan_code`
 - `amount`
-- `currency`
+- `currency`（V1 为 `CNY`）
 - `external_reference`
 - `status`
 - `paid_at`
 
 ---
 
-## 7. 通知可靠性
+## 12. 核心运营指标
 
-### 7.1 Outbox lease
+### 12.1 用户等待时间
 
-Worker 把任务从 `pending` 取出后进入 `sending`，同时写入：
+核心指标：
 
 ```text
-locked_at
-locked_by
-lock_expires_at
+first_matched_event_at - activated_at
 ```
 
-如果 worker 崩溃，lease 到期后任务可以重新进入投递流程，避免永久卡在 `sending`。
+观察：
 
-### 7.2 不承诺 exactly-once Email
+- 24 小时内首次匹配比例；
+- 3 天内首次匹配比例；
+- 7 天内首次匹配比例；
+- 14 天内首次匹配比例；
+- P50 / P75 / P90 首次匹配等待时间。
 
-邮件系统存在经典不确定性：Provider 可能已经接受邮件，但客户端在收到确认前 timeout。
+这些数据用于判断 V2 是否应该把 14 天主力套餐缩短到 7 天或其他周期，而不是依靠猜测。
 
-因此目标是：
+### 12.2 通知链路延迟
 
-**at-least-once delivery + best-effort deduplication**
-
-如果未来 Email Provider 支持 idempotency key，优先使用 `notification_outbox.id` 作为稳定幂等键。
-
-只有确认 Provider 接受成功后才把 outbox 标为 `sent`。
-
-### 7.3 每位用户独立投递
-
-- 不使用共享 To/CC/BCC 群发。
-- 邮件包含来源、官方预约入口、观测时间和非官方身份说明。
-- 每封邮件包含唯一退订入口。
-- 退订后立即停止创建新 notification。
-
----
-
-## 8. 延迟指标
-
-真正重要的不是单独的 poll interval，而是端到端提醒延迟：
+至少观察：
 
 ```text
 source_updated_at
 → observed_at
 → event_created_at
-→ outbox_created_at
-→ provider_accepted_at
+→ first_notification_queued_at
+→ first_provider_accepted_at
 ```
 
-至少记录并观察：
-
-- Detect latency：来源变化到平台发现。
-- Queue latency：事件到进入通知 worker。
-- Provider latency：发送请求到 Provider 接受。
-- P50 / P95 notification pipeline latency。
+分别计算 detect / queue / provider latency 和 P50 / P95 pipeline latency。
 
 用户邮箱客户端何时真正弹出通知可能无法精确测量，因此产品文案不能承诺固定秒数。
 
-只有真实试运营证明 Email 延迟不足时，才优先评估 Telegram 等第二通知渠道。
+---
+
+## 13. 上线与商业验证原则
+
+早期继续采用人工收款 + CLI 开通，不为了少量用户提前开发：
+
+- 在线支付；
+- Web 注册；
+- 登录密码；
+- 用户中心；
+- 忘记密码；
+- 复杂订单后台。
+
+Family 先作为隐藏/手动套餐验证真实需求。
+
+V1 价格和周期是试运营基准。积累足够真实数据后，根据转化率、首次匹配时间分布、延期触发率和用户反馈调整套餐，不把当前价格写成永久承诺。
 
 ---
 
-## 9. 套餐与商业验证
+## 14. 必须测试的场景
 
-MVP 不按官网轮询频率收费。
+### Source / State
 
-建议先用非常简单的期限型方案验证需求：
-
-| 类型 | 建议 |
-|---|---|
-| 体验 | 24–48 小时，完整事件提醒，少量筛选 |
-| 基础 | 14 天，1 组筛选 |
-| 标准 | 30 天，最多 3 组筛选 |
-| 家庭 | 多位独立收件人和多个筛选条件，确认有真实需求后再实现 |
-
-价格通过少量真实顾客访谈和试运营决定，不写死在代码里。
-
-早期人工收款 + CLI 开通即可，不为了十几位用户提前开发：
-
-- 在线支付
-- Web 注册
-- 登录密码
-- 用户中心
-- 忘记密码
-- 复杂订单后台
-
-这些功能只有在真实运营负担证明值得自动化时再做。
-
----
-
-## 10. SQLite 运行策略
-
-SQLite 足够支撑小规模单实例 MVP。
-
-要求：
-
-- `foreign_keys = ON`
-- WAL mode
-- `busy_timeout`
-- 显式 transaction
-- schema version / migration 管理
-- 定期数据库备份
-- 定期执行恢复测试
-
-在迁移到多实例或 VPS 水平扩展前，再重新评估 PostgreSQL、任务锁、邮件限额和监控。
-
-当前不提前引入 Redis / Celery / RabbitMQ。
-
----
-
-## 11. 必须测试的场景
-
-### Snapshot / Observation
-
-- 网络超时不会改变 quota state。
-- 无效 JSON / HTML 不会改变 quota state。
+- 网络超时、无效响应和 parser error 不改变 quota state。
 - 空或明显不完整 snapshot 被拒绝。
-- 重复 key 被拒绝。
-- 未知状态被拒绝或安全失败。
-- parser version 被记录。
-- source 更新时间倒退时按 source adapter 规则拒绝或告警。
-
-### State / Event
-
-- 初始 baseline 不创建历史提醒事件。
-- `unavailable -> limited`。
-- `unavailable -> available`。
-- `limited -> available`。
-- `available -> limited` 不创建“有名额”事件。
+- 初始 baseline 不创建历史提醒。
 - 一次缺失不会关闭 occurrence。
 - 连续确认缺失后才关闭 occurrence。
 - 消失后再次出现生成新的 occurrence。
 - 程序重启后不重复发送旧事件。
+
+### Subscription / Product
+
+- Trial 每个邮箱最多使用一次。
+- Trial 激活测试邮件与真实 quota alert 有明确区分。
+- Quick 最多 3 个预约目标。
+- Goal 最多 6 个预约目标。
+- Family 最多 10 个预约目标、最多 3 个接收邮箱。
+- Goal / Family 原服务期内 0 个有效匹配事件时最多自动延长 7 天一次。
+- 已存在有效匹配事件时不触发延长。
+- 无效或已过期目标不应被用于滥用延长保障。
 
 ### Notification
 
@@ -453,137 +441,29 @@ SQLite 足够支撑小规模单实例 MVP。
 - 邮件失败不会被标记成功。
 - 到期和退订立即停止创建新通知。
 
-### Runtime
-
-- 两个 Poller 同时启动时只有一个有效采集者。
-- 数据库备份可恢复。
-- 日志不包含完整邮箱、密钥或证件资料。
-
 ---
 
-## 12. 合规上线门槛
+## 15. 合规上线门槛
 
 公开收费前必须完成：
 
-1. 向 GovHK / 入境事务处说明实际商业模式，分别确认：
-   - 是否允许程序周期性读取相关公开 quota 数据；
-   - 是否允许基于该数据提供第三方提醒服务；
-   - 是否允许该提醒服务收费。
-2. 根据得到的许可设置明确的请求频率上限、timeout、退避和 jitter。
-3. 准备隐私声明、服务条款、退款规则和免责声明。
-4. 页面和邮件不得使用政府标志或使用户误认为官方服务。
-5. 明确不保证数据实时、通知必达或预约成功。
-6. 完成端到端安全测试、备份恢复和故障告警。
-7. 决定代码分发策略；在商业模式明确前不随意添加宽松开源许可证。
-
-详细清单见 `docs/COMPLIANCE_CHECKLIST.md`。
+1. 向 GovHK / 入境事务处确认公开配额数据自动读取、第三方提醒及商业收费的允许使用边界。
+2. 准备隐私声明、服务条款、退款规则和免责声明。
+3. 明确服务只提供提醒，用户仍需自行在官方系统预约。
+4. 商品页面不得使用“必达”“保证抢到”“连号”“VIP 更快”等误导性表述。
+5. 完成端到端安全测试、数据库备份和故障告警。
+6. 用少量获同意用户进行试运营，再决定是否扩大收费。
 
 ---
 
-## 13. 开发里程碑
+## 16. 里程碑
 
-### M0：数据与商业边界确认
+1. **M0：方案与合规确认**——确认数据使用、第三方提醒和商业用途边界。
+2. **M1A：Source Safety**——真实数据源解析、observation、validation 与异常防护。
+3. **M1B：Event Core**——confirmed state、occurrence、event 与持久化。
+4. **M2：Email Notification**——激活测试邮件、outbox、重试、退订与延迟指标。
+5. **M3：Subscription Product**——Trial / Quick / Goal / Family 规则、预约目标、延期保障、CLI 和人工订单。
+6. **M4：Pilot**——少量真实用户试运营，收集转化率与首次匹配时间分布。
+7. **M5：Expansion Review**——根据真实需求决定 Telegram、在线支付、网页后台和数据库升级。
 
-目标：先确认可以怎么合法、克制地使用公开数据。
-
-完成条件：
-
-- 数据自动读取边界明确。
-- 商业提醒边界明确。
-- 请求频率和技术限制有依据。
-- 产品文案不暗示官方身份或预约成功保证。
-
-### M1A：Source Safety
-
-目标：证明“拿到的数据值得信任”。
-
-开发：
-
-- Source adapter。
-- Fetch timeout / retry / backoff / jitter。
-- Parser。
-- Observation audit。
-- Snapshot validation。
-- payload hash / parser version。
-- 数据完整性测试。
-
-完成条件：异常页面、超时和部分响应不会制造假 quota state。
-
-### M1B：Event Core
-
-目标：证明“状态变化不会误报和重复报”。
-
-开发：
-
-- Confirmed state。
-- Missing confirmation。
-- occurrence_id。
-- Baseline persistence。
-- quota_events。
-- SQLite persistence。
-- 单元测试与重启恢复测试。
-
-当前仓库已经开始实现这一层的纯领域模型和初始 SQLite schema。
-
-### M2：单用户 Email 投递
-
-开发：
-
-- Notification outbox。
-- Lease / retry。
-- Email provider adapter。
-- 一键退订。
-- delivery_attempts。
-- latency metrics。
-
-目标：连续运行并证明通知链路稳定。
-
-### M3：多用户订阅
-
-开发：
-
-- customers。
-- subscriptions。
-- filters。
-- matcher。
-- CLI。
-- 人工订单记录。
-
-不开发在线支付和用户后台。
-
-### M4：5–20 位真实用户试运营
-
-重点收集：
-
-- 误报率。
-- 漏报反馈。
-- P50 / P95 检测及投递延迟。
-- Email 实际体验。
-- 用户真正使用的筛选条件。
-- 愿意支付的价格与服务期限。
-- 支持工作量和退款原因。
-
-### M5：按真实需求扩展
-
-只有数据支持时再决定：
-
-- Telegram。
-- Web UI。
-- 在线支付。
-- PostgreSQL。
-- 更自动化的运营后台。
-
----
-
-## 14. 当前开发优先级
-
-当前最重要的不是前端、支付或获客页面，而是把 quota engine 做到：
-
-- 连续运行稳定。
-- 网络异常不制造假名额。
-- 页面结构变化能快速发现。
-- 状态变化可审计。
-- 消失/重现正确识别。
-- 重启不重复通知。
-
-只有这个核心跑稳，才进入 Email、多用户和收费试运营。
+当前阶段仍以 **正确检测公开配额 + 抗误报 + 可审计** 为最高优先级，不因套餐设计提前扩大技术复杂度。
