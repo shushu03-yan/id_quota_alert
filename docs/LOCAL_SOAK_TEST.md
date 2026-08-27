@@ -69,6 +69,15 @@ POLL outcome=fetch_error applied=false duplicate=false events=0 error=http_429
 data/quota_alert.sqlite3
 ```
 
+优先使用内置只读摘要：
+
+```powershell
+python -m app health
+python -m app soak-summary
+```
+
+`health` 会在最后成功 Poll 超出阈值时显示 `STALE`，但不会自动重启进程。`soak-summary` 在 observation 时间跨度不足 3 天时固定显示 `SOAK TEST NOT COMPLETE`；达到 3 天也只会显示需要人工复核，不会自动显示 PASSED。
+
 可以使用 Python 快速查看关键表：
 
 ```powershell
