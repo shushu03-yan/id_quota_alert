@@ -398,11 +398,12 @@ def insert_quota_events(
     for event in events:
         cursor = connection.execute(
             """
-            INSERT OR IGNORE INTO quota_events(
+            INSERT INTO quota_events(
                 quota_date, office_id, from_status, to_status, occurrence_id,
                 observed_at, source_updated_at, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(quota_date, office_id, occurrence_id, to_status) DO NOTHING
             """,
             (
                 event.key.date.isoformat(),
