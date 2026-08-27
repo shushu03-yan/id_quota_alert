@@ -135,7 +135,7 @@ python -m app poll
 每天至少检查一次 observation 分布：
 
 ```powershell
-python -c "import sqlite3; c=sqlite3.connect('data/quota_alert.sqlite3'); [print(r) for r in c.execute('select outcome, coalesce(error_code,\"-\"), count(*) from quota_observations group by outcome,error_code order by outcome,error_code')]"
+python -c "import sqlite3; c=sqlite3.connect('data/quota_alert.sqlite3'); [print(r) for r in c.execute('select outcome, coalesce(error_code, char(45)), count(*) from quota_observations group by outcome,error_code order by outcome,error_code')]"
 ```
 
 检查最近 observation：
