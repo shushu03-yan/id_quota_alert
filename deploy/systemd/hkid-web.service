@@ -1,0 +1,19 @@
+[Unit]
+Description=HKID Alert activation and management web MVP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hkid-alert
+Group=hkid-alert
+WorkingDirectory=/opt/hkid-quota-alert
+EnvironmentFile=/etc/hkid-quota-alert.env
+ExecStart=/opt/hkid-quota-alert/.venv/bin/python -m app web --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
