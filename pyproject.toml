@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "id-quota-alert"
+version = "0.0.1"
+description = "Planned multi-user alert service for public appointment quota changes"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
