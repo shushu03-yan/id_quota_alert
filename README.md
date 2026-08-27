@@ -6,7 +6,9 @@
 
 ## 当前状态
 
-项目当前处于 **developer test ready**：M1 可靠事件核心以及 M2/M3 的本地工程实现已经具备自动测试，但真实 3–7 天 soak、真实 Email Provider、完整人工链路、重启和备份恢复演练均为 **NOT YET VALIDATED**。因此尚不属于 local pilot ready，更不属于 paid production ready。
+项目当前处于 **product skeleton complete / developer test ready**：M1 可靠事件核心、M2 通知链路、M3 订阅生命周期，以及面向普通用户的激活/管理 Web 框架已经接通并有自动测试。真实 3–7 天 soak、真实 Email Provider 端到端投递、重启与备份恢复演练、HTTPS/VPS 和最终政策文本仍为 **NOT YET VALIDATED**，因此尚不能称为 paid production ready。
+
+当前开发策略是先完成完整产品闭环，再让真实 soak 与运行验证并行推进，而不是继续对单个模块做无限局部优化。
 
 目前已经实现：
 
@@ -34,18 +36,27 @@
 - Appointment Matcher：按有效期、办事处、日期、最低状态和退订状态匹配；一个 target 可包含多个 office。
 - SMTP 开发 Provider 抽象、Email Worker，以及首次匹配/入队/Provider 接受指标。
 - 随机一次性激活码（仅存 hash）、Email 验证（仅存 token hash）、激活确认邮件、Trial 每邮箱一次、套餐目标/邮箱上限和 Goal/Family 0-match 一次性延期。
-- 短期一次性 Magic Link、目标查看/修改和退订 Web MVP。
+- 短期一次性 Magic Link、目标查看/修改和退订。
+- 用户首页 `/`、普通表单 `/activate`、Magic Link 自助申请 `/manage/request`、目标管理 `/manage`、退订 `/unsubscribe`。
+- 激活/管理页使用日期、办事处和提醒门槛的普通表单，不再要求普通用户填写 JSON。
+- `/privacy`、`/terms`、`/refund` 试运行草案页面；正式公开收费前仍需最终确认。
+- `maintenance` one-shot 命令 + systemd timer，用于在 runtime 中实际执行 Goal / Family 的 0-match 延长判断。
+- `customer list`、`subscription list/show`、`outbox status` 轻量运营 CLI，避免过早建设 Admin Dashboard。
+- `email-smoke --to ...` 用于真实 SMTP Provider smoke test；测试邮件明确不是配额提醒。
 - SQLite 官方 backup API 一致性备份与保留轮换，以及非 root systemd 模板。
 
-目前 **尚未完成**：
+目前 **尚未完成 / 尚未真实验证**：
 
 - 3–7 天真实连续运行 soak test；因此还不能据此宣称 Poller 已达到生产稳定性。
 - 真实 SMTP / 正式 Email Provider 投递验证。
 - activation → verify → activation email → quota alert 的真实人工端到端验证。
 - 备份 restore 演练、进程重启演练、VPS/HTTPS/外部监控与 offsite backup。
-- 公开收费、注册、支付或用户后台。
+- Family 完整自助多邮箱邀请/验证流程（V1 仍计划隐藏、人工处理）。
+- 在线支付；V1 计划继续使用外部人工收款 + Activation Code，不把支付开发作为早期上线阻塞项。
+- 公开收费前的数据使用、第三方提醒与商业使用边界确认。
+- Privacy / Terms / Refund 最终文本与运营联系方式。
 
-因此当前仓库仍不可直接作为生产收费服务运行。
+因此当前仓库已经具备完整产品框架，但仍不可直接作为未经验证的生产收费服务运行。
 
 ## 产品定位
 
@@ -188,19 +199,38 @@ python -m app health
 python -m app soak-summary
 ```
 
-开发环境 Email Worker、激活码、Web 与一致性备份：
+Launch Skeleton 的主要本地命令：
 
 ```powershell
+# Provider smoke（不是配额提醒）
+python -m app email-smoke --to your-test@example.com
+
+# Email Worker
+python -m app email-worker
+
+# 激活码
 python -m app activation-code create --plan goal
 python -m app activation-code list
-python -m app email-worker
+
+# Web
 python -m app web --host 127.0.0.1 --port 8080
+
+# 运营视图
+python -m app customer list
+python -m app subscription list
+python -m app subscription show 1
+python -m app outbox status
+
+# 延长保障 runtime maintenance
+python -m app maintenance
+
+# 一致性备份
 python -m app backup --retain 30
 ```
 
 SMTP 密钥、`TOKEN_SIGNING_SECRET` 和公开 URL 只从进程环境读取。`.env.example` 仅含占位值；服务不会把 SMTP 密码、激活码明文、验证 token 或 Magic Link token 写入数据库或普通日志。
 
-连续运行前请先阅读 [`docs/LOCAL_SOAK_TEST.md`](docs/LOCAL_SOAK_TEST.md)。默认 Poller 配置只是当前工程测试基准，不代表已经获得来源方对某一具体轮询频率、第三方提醒或商业用途的许可。
+连续运行前请阅读 [`docs/LOCAL_SOAK_TEST.md`](docs/LOCAL_SOAK_TEST.md)。部署框架见 [`docs/DEPLOYMENT_PREP.md`](docs/DEPLOYMENT_PREP.md)。默认 Poller 配置只是当前工程测试基准，不代表已经获得来源方对某一具体轮询频率、第三方提醒或商业用途的许可。
 
 Python 要求：**3.11+**。
 
@@ -211,6 +241,7 @@ id_quota_alert/
 ├── app/
 │   ├── __init__.py
 │   ├── __main__.py
+│   ├── admin.py
 │   ├── config.py
 │   ├── source.py
 │   ├── quota.py
@@ -225,6 +256,7 @@ id_quota_alert/
 │   ├── backup.py
 │   └── storage.py
 ├── tests/
+│   ├── test_launch_skeleton.py
 │   ├── test_project_skeleton.py
 │   ├── test_quota_core.py
 │   ├── test_source_adapter.py
@@ -232,13 +264,20 @@ id_quota_alert/
 │   └── test_storage_schema.py
 ├── docs/
 │   ├── COMPLIANCE_CHECKLIST.md
+│   ├── DEPLOYMENT_PREP.md
 │   └── LOCAL_SOAK_TEST.md
+├── deploy/systemd/
+│   ├── hkid-poller.service
+│   ├── hkid-email-worker.service
+│   ├── hkid-web.service
+│   ├── hkid-maintenance.service
+│   └── hkid-maintenance.timer
 ├── .env.example
 ├── pyproject.toml
 └── QUOTA_ALERT_PLAN.md
 ```
 
-部署准备文件位于 `deploy/systemd/`。这些模板不包含密钥，也不代表已经完成 VPS、HTTPS、监控或生产验证。
+部署模板不包含密钥，也不代表已经完成 VPS、HTTPS、监控或生产验证。
 
 ## 数据来源
 
@@ -273,9 +312,10 @@ id_quota_alert/
 
 1. 确认公开配额数据的自动读取、第三方提醒及商业使用边界。
 2. 对真实 Source Adapter + Poller 完成 3–7 天连续运行验证，确认结构变化、网络异常和来源异常不会制造假事件。
-3. 完成 Email outbox、重试、退订、激活测试邮件和延迟监控。
-4. 完成 Trial 一次性限制、预约目标数量限制和延长保障逻辑测试。
-5. 完成隐私声明、服务条款、退款规则和免责声明。
-6. 使用少量获同意用户进行试运营，再根据真实数据调整周期与价格。
+3. 对真实 Email Provider 完成 activation → verify → activation email → quota alert 人工 E2E。
+4. 完成重启恢复和 backup restore 演练。
+5. 配置域名、HTTPS、基础监控与 offsite backup。
+6. 最终确认隐私声明、服务条款、退款规则和免责声明。
+7. 使用少量获同意用户进行 private pilot，再根据真实数据调整周期与价格。
 
 完整路线见 [QUOTA_ALERT_PLAN.md](QUOTA_ALERT_PLAN.md)。
