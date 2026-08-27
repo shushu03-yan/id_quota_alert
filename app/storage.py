@@ -1,8 +1,9 @@
 """SQLite storage bootstrap for the small single-instance MVP.
 
-The schema encodes the important reliability rules in the database where possible:
-notification deduplication is UNIQUE, outbox work uses expiring leases, and source
-observations are stored separately from confirmed quota state.
+The schema encodes the important reliability and product rules in the database where
+possible: notification deduplication is UNIQUE, outbox work uses expiring leases,
+source observations are stored separately from confirmed quota state, and subscription
+records include the timestamps needed to evaluate the V1 task-oriented plans.
 """
 
 from __future__ import annotations
@@ -67,7 +68,8 @@ CREATE TABLE IF NOT EXISTS customers (
     email_normalized TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
     unsubscribed_at TEXT,
-    consent_source TEXT NOT NULL
+    consent_source TEXT NOT NULL,
+    trial_used_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -75,8 +77,14 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     customer_id INTEGER NOT NULL REFERENCES customers(id),
     plan_code TEXT NOT NULL,
     starts_at TEXT NOT NULL,
+    activated_at TEXT,
+    original_expires_at TEXT,
     expires_at TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    guarantee_extended_at TEXT,
+    first_matched_event_at TEXT,
+    first_notification_queued_at TEXT,
+    first_provider_accepted_at TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -86,6 +94,7 @@ ON subscriptions(customer_id);
 CREATE TABLE IF NOT EXISTS subscription_filters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    target_key TEXT NOT NULL DEFAULT 'default',
     earliest_date TEXT NOT NULL,
     deadline TEXT NOT NULL,
     office_id TEXT NOT NULL,
@@ -94,6 +103,9 @@ CREATE TABLE IF NOT EXISTS subscription_filters (
 
 CREATE INDEX IF NOT EXISTS idx_subscription_filters_subscription
 ON subscription_filters(subscription_id);
+
+CREATE INDEX IF NOT EXISTS idx_subscription_filters_target
+ON subscription_filters(subscription_id, target_key);
 
 CREATE TABLE IF NOT EXISTS notification_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +149,20 @@ CREATE TABLE IF NOT EXISTS orders (
 """
 
 
+MIGRATION_V2_SQL = """
+ALTER TABLE customers ADD COLUMN trial_used_at TEXT;
+
+ALTER TABLE subscriptions ADD COLUMN activated_at TEXT;
+ALTER TABLE subscriptions ADD COLUMN original_expires_at TEXT;
+ALTER TABLE subscriptions ADD COLUMN guarantee_extended_at TEXT;
+ALTER TABLE subscriptions ADD COLUMN first_matched_event_at TEXT;
+ALTER TABLE subscriptions ADD COLUMN first_notification_queued_at TEXT;
+ALTER TABLE subscriptions ADD COLUMN first_provider_accepted_at TEXT;
+
+ALTER TABLE subscription_filters ADD COLUMN target_key TEXT NOT NULL DEFAULT 'default';
+"""
+
+
 def connect_database(path: Path | str) -> sqlite3.Connection:
     """Open SQLite with the MVP safety settings enabled."""
 
@@ -150,9 +176,70 @@ def connect_database(path: Path | str) -> sqlite3.Connection:
     return connection
 
 
+def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    """Add V1 product-plan fields to databases created by schema version 1."""
+
+    migrations = [
+        ("customers", "trial_used_at", "ALTER TABLE customers ADD COLUMN trial_used_at TEXT"),
+        ("subscriptions", "activated_at", "ALTER TABLE subscriptions ADD COLUMN activated_at TEXT"),
+        (
+            "subscriptions",
+            "original_expires_at",
+            "ALTER TABLE subscriptions ADD COLUMN original_expires_at TEXT",
+        ),
+        (
+            "subscriptions",
+            "guarantee_extended_at",
+            "ALTER TABLE subscriptions ADD COLUMN guarantee_extended_at TEXT",
+        ),
+        (
+            "subscriptions",
+            "first_matched_event_at",
+            "ALTER TABLE subscriptions ADD COLUMN first_matched_event_at TEXT",
+        ),
+        (
+            "subscriptions",
+            "first_notification_queued_at",
+            "ALTER TABLE subscriptions ADD COLUMN first_notification_queued_at TEXT",
+        ),
+        (
+            "subscriptions",
+            "first_provider_accepted_at",
+            "ALTER TABLE subscriptions ADD COLUMN first_provider_accepted_at TEXT",
+        ),
+        (
+            "subscription_filters",
+            "target_key",
+            "ALTER TABLE subscription_filters ADD COLUMN target_key TEXT NOT NULL DEFAULT 'default'",
+        ),
+    ]
+
+    for table, column, statement in migrations:
+        if not _column_exists(connection, table, column):
+            connection.execute(statement)
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_subscription_filters_target
+        ON subscription_filters(subscription_id, target_key)
+        """
+    )
+
+
 def initialize_database(connection: sqlite3.Connection) -> None:
-    """Create the initial schema idempotently."""
+    """Create or upgrade the SQLite schema idempotently."""
+
+    current_version = connection.execute("PRAGMA user_version").fetchone()[0]
 
     connection.executescript(SCHEMA_SQL)
-    connection.execute("PRAGMA user_version = 1")
+
+    if current_version < 2:
+        _migrate_v1_to_v2(connection)
+
+    connection.execute("PRAGMA user_version = 2")
     connection.commit()
