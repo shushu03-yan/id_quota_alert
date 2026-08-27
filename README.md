@@ -6,13 +6,17 @@
 
 ## 当前状态
 
-项目已从纯 M0 规划进入 **M1：可靠事件核心**。
+项目已从纯 M0 规划进入 **M1：可靠事件核心**，其中 M1A Source Adapter 已有首版实现。
 
 目前已经实现：
 
 - 配额领域模型：`unavailable / limited / available`。
 - `ValidatedSnapshot`：只有通过验证的完整快照才允许驱动状态变化。
 - `quota_observations` 审计模型：获取失败、解析失败与配额状态严格分离。
+- GovHK / 入境事务处公开配额 `getSituation` Source Adapter（默认 `svcId=579`）。
+- Source Adapter 对 timeout、403、429、5xx、空响应、非法 JSON、未知状态值和 source 更新时间倒退进行失败分类。
+- `office[] × date` 完整性检查：部分办事处数据缺失时拒绝快照，不把缺失误判为名额消失。
+- `quotaR / quotaK` 解析与聚合：`quota-g -> available`、`quota-y -> limited`、`quota-r / no-quota* -> unavailable`，并保留当前有名额的 `R / K` 时段标签。
 - Confirmed State 状态机。
 - 连续缺失确认机制：单次缺失不会直接关闭现有名额 occurrence。
 - `occurrence_id`：支持“消失后再次出现”生成新事件。
@@ -20,12 +24,12 @@
 - SQLite 初始 schema。
 - `notification_outbox` 数据库级唯一约束，避免同一事件重复创建通知。
 - Outbox lease 字段，为 worker 崩溃后的安全重试预留基础。
-- 核心状态机与 SQLite 约束测试。
+- 核心状态机、Source Adapter 与 SQLite 约束测试。
 
 目前 **尚未实现**：
 
-- GovHK 实际网络请求与页面/API 解析器。
-- 定时 Poller。
+- 定时 Poller、退避/jitter 与 3–7 天连续真实运行验证。
+- Observation / Snapshot / Confirmed State 的完整 Poller 持久化编排。
 - Email 投递 worker。
 - 多用户 CLI 管理流程。
 - 公开收费、注册、支付或用户后台。
@@ -175,6 +179,7 @@ id_quota_alert/
 │   ├── __init__.py
 │   ├── __main__.py
 │   ├── config.py
+│   ├── source.py
 │   ├── quota.py
 │   ├── observations.py
 │   ├── events.py
@@ -182,6 +187,7 @@ id_quota_alert/
 ├── tests/
 │   ├── test_project_skeleton.py
 │   ├── test_quota_core.py
+│   ├── test_source_adapter.py
 │   └── test_storage_schema.py
 ├── docs/
 │   └── COMPLIANCE_CHECKLIST.md
@@ -190,23 +196,25 @@ id_quota_alert/
 └── QUOTA_ALERT_PLAN.md
 ```
 
-后续的 `matcher.py`、`notifier.py`、`scheduler.py` 与 `cli.py` 会在对应里程碑再加入，不提前制造复杂度。
+后续的 `poller.py`、`matcher.py`、`notifier.py`、`scheduler.py` 与 `cli.py` 会在对应里程碑再加入，不提前制造复杂度。
 
 ## 数据来源
 
 计划只使用获准的 GovHK / 入境事务处公开配额信息：
 
 - [GovHK 人事登记办事处预约配额预览](https://www.gov.hk/tc/apps/bookidcardquota.htm)
+- [入境事务处公开配额预览](https://eservices.es2.immd.gov.hk/es/quota-enquiry-client/?l=zh-CN&appId=579)
+- Source Adapter 当前读取该预览所使用的公开 `getSituation` JSON 数据（`svcId=579`）。
 - [网上预约申领香港智能身份证](https://www.immd.gov.hk/hkt/hkid.html)
 
-实际预约情况始终以官方系统为准。
+实际预约情况始终以官方系统为准。Source Adapter 的实现不代表已经完成上线前的数据使用/商业用途确认。
 
 ## 上线前要求
 
 公开收费前必须完成：
 
 1. 确认公开配额数据的自动读取、第三方提醒及商业使用边界。
-2. 完成真实 source adapter，并验证不会因异常页面制造假事件。
+2. 对真实 Source Adapter 完成连续运行验证，确认结构变化和异常响应不会制造假事件。
 3. 完成 Email outbox、重试、退订、激活测试邮件和延迟监控。
 4. 完成 Trial 一次性限制、预约目标数量限制和延长保障逻辑测试。
 5. 完成隐私声明、服务条款、退款规则和免责声明。
