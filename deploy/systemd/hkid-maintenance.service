@@ -11,3 +11,4 @@ EnvironmentFile=/etc/hkid-quota-alert.env
 ExecStart=/opt/hkid-quota-alert/.venv/bin/python -m app maintenance
 NoNewPrivileges=true
 PrivateTmp=true
+UMask=0027

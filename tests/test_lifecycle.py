@@ -275,3 +275,27 @@ def test_manage_link_email_queues_only_record_id_not_plain_token(tmp_path):
     payload = connection.execute("SELECT payload_json FROM notification_outbox WHERE notification_kind='manage_link'").fetchone()[0]
     assert f'"magic_link_id":{token_id}' in payload
     assert "token=" not in payload
+
+
+def test_expired_subscription_cannot_request_management_link(tmp_path):
+    connection = _db(tmp_path)
+    code = create_activation_code(connection, plan_code="goal", now=NOW)
+    verification_id = begin_activation(
+        connection, code=code, email="u@example.com", targets=TARGET,
+        now=NOW, base_url="https://example.test", signing_secret=SECRET,
+    )
+    subscription_id = verify_activation(
+        connection,
+        token=verification_token(verification_id, signing_secret=SECRET),
+        now=NOW + timedelta(minutes=1),
+    )
+    connection.execute(
+        "UPDATE subscriptions SET expires_at=? WHERE id=?",
+        ((NOW + timedelta(minutes=2)).isoformat().replace("+00:00", "Z"), subscription_id),
+    )
+    connection.commit()
+    with pytest.raises(ValueError, match="active subscription not found"):
+        request_magic_link(
+            connection, email="u@example.com", now=NOW + timedelta(minutes=3),
+            signing_secret=SECRET, base_url="https://example.test",
+        )

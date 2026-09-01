@@ -8,7 +8,9 @@ version = "0.0.1"
 description = "Planned multi-user alert service for public appointment quota changes"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "gunicorn>=23,<24",
+]
 
 [project.optional-dependencies]
 dev = [

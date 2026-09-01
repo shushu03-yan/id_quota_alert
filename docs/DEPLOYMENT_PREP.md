@@ -7,8 +7,14 @@
 - `hkid-web.service`: activation, Email verification, management-link request, target management and unsubscribe Web app;
 - `hkid-maintenance.service`: one-shot subscription maintenance command;
 - `hkid-maintenance.timer`: runs maintenance hourly so Goal / Family zero-match extensions are actually evaluated at runtime.
+- `hkid-backup.service` + `hkid-backup.timer`: create and retain a daily consistent SQLite backup.
 
 All services use the non-root `hkid-alert` account, `/opt/hkid-quota-alert` as their working directory, and `/etc/hkid-quota-alert.env` for configuration. Secrets must not be placed in unit files or committed to Git.
+
+The Web unit uses Gunicorn on `127.0.0.1:8080`. The Nginx template in
+`deploy/nginx/hkid-notice.conf` provides the public reverse proxy, request-size limit
+and basic rate limiting for `hkid-notice.com` and `www.hkid-notice.com`; HTTPS
+certificates are provisioned on the host after DNS is confirmed.
 
 ## Minimal operator commands
 
@@ -56,7 +62,7 @@ These templates are not a production approval. An operator still needs to:
 
 - create the Linux user/directories and Python virtual environment;
 - provision `/etc/hkid-quota-alert.env` with restrictive permissions;
-- configure a domain, reverse proxy and HTTPS;
+- provision and renew the HTTPS certificate for the configured domain;
 - validate the real Email Provider and sender-domain authentication;
 - continue and review the 3–7 day source/poller soak;
 - exercise stop/restart recovery;

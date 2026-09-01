@@ -1,0 +1,14 @@
+[Unit]
+Description=HKID Alert consistent SQLite backup
+After=hkid-poller.service
+
+[Service]
+Type=oneshot
+User=hkid-alert
+Group=hkid-alert
+WorkingDirectory=/opt/hkid-quota-alert
+EnvironmentFile=/etc/hkid-quota-alert.env
+ExecStart=/opt/hkid-quota-alert/.venv/bin/python -m app backup --directory /opt/hkid-quota-alert/data/backups --retain 30
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0027

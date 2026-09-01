@@ -29,11 +29,12 @@ def _subscription_event(
     *,
     activated_at="2026-08-28T10:00:00Z",
     observed_at="2026-08-28T12:00:00Z",
+    expires_at="2026-09-11T10:00:00Z",
 ):
     customer_id = connection.execute("INSERT INTO customers(email_normalized,created_at,consent_source) VALUES ('u@example.com',?,'test')", ("2026-08-28T10:00:00Z",)).lastrowid
     sub_id = connection.execute("""INSERT INTO subscriptions(customer_id,plan_code,starts_at,activated_at,original_expires_at,expires_at,active,created_at)
-        VALUES (?,'goal',? ,?,'2026-09-11T10:00:00Z','2026-09-11T10:00:00Z',1,?)""",
-        (customer_id, activated_at, activated_at, activated_at)).lastrowid
+        VALUES (?,'goal',? ,?,?,?,1,?)""",
+        (customer_id, activated_at, activated_at, expires_at, expires_at, activated_at)).lastrowid
     connection.execute("INSERT INTO subscription_filters(subscription_id,target_key,earliest_date,deadline,office_id,minimum_status) VALUES (?,'a','2026-09-01','2026-09-10','sha-tin','limited')", (sub_id,))
     event_id = connection.execute("""INSERT INTO quota_events(quota_date,office_id,from_status,to_status,occurrence_id,observed_at,created_at)
         VALUES ('2026-09-03','sha-tin','unavailable','available','occ',?,?)""", (observed_at, observed_at)).lastrowid
@@ -72,6 +73,18 @@ def test_event_after_activation_creates_outbox_using_event_time(tmp_path):
     assert connection.execute(
         "SELECT first_matched_event_at FROM subscriptions WHERE id=?", (sub_id,)
     ).fetchone()[0] == "2026-08-28T11:00:01Z"
+
+
+def test_delayed_worker_matches_event_that_happened_before_subscription_expiry(tmp_path):
+    connection = _db(tmp_path)
+    _, _, event_id = _subscription_event(
+        connection,
+        observed_at="2026-09-10T09:59:00Z",
+        expires_at="2026-09-10T10:00:00Z",
+    )
+    assert match_quota_event(
+        connection, event_id, now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+    ) == 1
 
 
 def test_worker_restart_never_sends_processed_backlog_to_new_subscription(tmp_path):

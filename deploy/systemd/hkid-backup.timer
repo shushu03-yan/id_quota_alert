@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up HKID Alert SQLite database daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00 Asia/Hong_Kong
+Persistent=true
+RandomizedDelaySec=10m
+Unit=hkid-backup.service
+
+[Install]
+WantedBy=timers.target

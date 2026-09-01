@@ -64,12 +64,12 @@ def match_quota_event(connection: sqlite3.Connection, event_id: int, *, now: dat
         JOIN subscription_filters AS f ON f.subscription_id = s.id
         WHERE s.active = 1 AND s.activated_at IS NOT NULL
           AND s.starts_at <= ? AND s.expires_at > ?
-          AND ? >= s.starts_at AND ? >= s.activated_at
+          AND ? >= s.activated_at
           AND c.unsubscribed_at IS NULL
           AND f.earliest_date <= ? AND f.deadline >= ?
           AND (f.office_id = ? OR f.office_id = '*')
         """,
-        (_datetime_to_text(now), _datetime_to_text(now), event["observed_at"], event["observed_at"], event["quota_date"],
+        (event["observed_at"], event["observed_at"], event["observed_at"], event["quota_date"],
          event["quota_date"], event["office_id"]),
     ).fetchall()
     queued = 0

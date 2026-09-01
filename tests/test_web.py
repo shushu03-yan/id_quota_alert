@@ -34,7 +34,10 @@ def test_activation_verify_manage_and_unsubscribe_routes(tmp_path):
     vid = begin_activation(connection, code=code, email="u@example.com", targets=TARGET,
                            now=NOW, base_url="https://example.test", signing_secret=SECRET)
     token = verification_token(vid, signing_secret=SECRET)
-    app = WebApplication(path, signing_secret=SECRET, public_base_url="https://example.test")
+    app = WebApplication(
+        path, signing_secret=SECRET, public_base_url="https://example.test",
+        clock=lambda: NOW + timedelta(minutes=1),
+    )
     assert _request(app, "/activate")[0] == "200 OK"
     assert _request(app, "/verify", query=urlencode({"token": token}))[0] == "200 OK"
     sub = connection.execute("SELECT id,customer_id FROM subscriptions").fetchone()
@@ -64,7 +67,10 @@ def test_magic_link_target_update_uses_strict_date_validation(tmp_path):
         connection, customer_id=customer_id, subscription_id=sub_id, now=NOW,
         signing_secret=SECRET,
     )
-    app = WebApplication(path, signing_secret=SECRET, public_base_url="https://example.test")
+    app = WebApplication(
+        path, signing_secret=SECRET, public_base_url="https://example.test",
+        clock=lambda: NOW + timedelta(minutes=1),
+    )
     status, body = _request(
         app, "/manage", method="POST",
         form={"token": magic, "targets": '[{"target_key":"a","earliest_date":"2026-9-01","deadline":"2026-09-10","offices":["sha-tin"],"minimum_status":"limited"}]'},

@@ -8,6 +8,7 @@ from html import escape
 import json
 import os
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs
 
 from .config import validate_token_signing_secret
@@ -21,7 +22,7 @@ from .lifecycle import (
     validate_targets,
     verify_activation,
 )
-from .storage import _datetime_from_text, connect_database, initialize_database
+from .storage import _datetime_from_text, _datetime_to_text, connect_database, initialize_database
 
 
 OFFICE_IDS = ("FTO", "RHK", "RKO", "RTK", "TMO", "YLO")
@@ -144,12 +145,13 @@ def _group_filters(rows) -> list[dict[str, object]]:
 class WebApplication:
     def __init__(
         self, database_path: Path | str, *, signing_secret: str, public_base_url: str,
-        app_env: str | None = None,
+        app_env: str | None = None, clock: Callable[[], datetime] | None = None,
     ) -> None:
         validate_token_signing_secret(signing_secret, app_env=app_env or os.getenv("APP_ENV", "development"))
         self.database_path = Path(database_path)
         self.signing_secret = signing_secret
         self.public_base_url = public_base_url.rstrip("/")
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def __call__(self, environ, start_response):
         path, method = environ.get("PATH_INFO", "/"), environ.get("REQUEST_METHOD", "GET")
@@ -177,14 +179,14 @@ class WebApplication:
                 data = _form_multidata(environ)
                 begin_activation(
                     connection, code=_last(data, "code"), email=_last(data, "email"),
-                    targets=_targets_from_form(data), now=datetime.now(timezone.utc),
+                    targets=_targets_from_form(data), now=self.clock(),
                     base_url=self.public_base_url, signing_secret=self.signing_secret,
                 )
                 return self._respond(start_response, "202 Accepted", _page("請驗證 Email", "<div class='card'><h1>檢查你的 Email</h1><p>驗證郵件已進入發送隊列。只有完成 Email 驗證後，套餐計時才會開始。</p></div>"))
 
             if path == "/verify" and method == "GET":
                 token = parse_qs(environ.get("QUERY_STRING", "")).get("token", [""])[-1]
-                verify_activation(connection, token=token, now=datetime.now(timezone.utc))
+                verify_activation(connection, token=token, now=self.clock())
                 return self._respond(start_response, "200 OK", _page("服務已啟用", "<div class='card'><h1>服務已啟用</h1><p>啟用確認郵件已進入發送隊列。這封確認郵件不代表目前有預約名額。</p></div>"))
 
             if path == "/manage/request" and method == "GET":
@@ -197,7 +199,7 @@ class WebApplication:
                 # Keep the response identical whether an active subscription exists to avoid account enumeration.
                 try:
                     request_magic_link(
-                        connection, email=_last(data, "email"), now=datetime.now(timezone.utc),
+                        connection, email=_last(data, "email"), now=self.clock(),
                         signing_secret=self.signing_secret, base_url=self.public_base_url,
                     )
                 except ValueError:
@@ -206,15 +208,17 @@ class WebApplication:
 
             if path == "/manage" and method == "GET":
                 token = parse_qs(environ.get("QUERY_STRING", "")).get("token", [""])[-1]
-                now = datetime.now(timezone.utc)
+                now = self.clock()
                 row = connection.execute(
                     "SELECT * FROM magic_link_tokens WHERE token_hash=? AND used_at IS NULL", (hash_secret(token),)
                 ).fetchone()
                 if row is None or (_datetime_from_text(row["expires_at"]) or now) <= now:
                     raise ValueError("management link unavailable")
                 subscription = connection.execute(
-                    "SELECT id, customer_id, plan_code, starts_at, expires_at FROM subscriptions WHERE id=? AND active=1",
-                    (row["subscription_id"],),
+                    """SELECT id, customer_id, plan_code, starts_at, expires_at
+                       FROM subscriptions WHERE id=? AND active=1
+                       AND starts_at <= ? AND expires_at > ?""",
+                    (row["subscription_id"], _datetime_to_text(now), _datetime_to_text(now)),
                 ).fetchone()
                 if subscription is None:
                     raise ValueError("active subscription not found")
@@ -234,13 +238,15 @@ class WebApplication:
                 return self._respond(start_response, "200 OK", body)
 
             if path == "/manage" and method == "POST":
-                data, now = _form_multidata(environ), datetime.now(timezone.utc)
+                data, now = _form_multidata(environ), self.clock()
                 customer_id, subscription_id = consume_magic_link(connection, token=_last(data, "token"), now=now)
                 if subscription_id is None:
                     raise ValueError("link has no subscription")
                 subscription = connection.execute(
-                    "SELECT plan_code FROM subscriptions WHERE id=? AND customer_id=? AND active=1",
-                    (subscription_id, customer_id),
+                    """SELECT plan_code FROM subscriptions
+                       WHERE id=? AND customer_id=? AND active=1
+                       AND starts_at <= ? AND expires_at > ?""",
+                    (subscription_id, customer_id, _datetime_to_text(now), _datetime_to_text(now)),
                 ).fetchone()
                 if subscription is None:
                     raise ValueError("active subscription not found")
@@ -264,7 +270,7 @@ class WebApplication:
                 return self._respond(start_response, "200 OK", body)
 
             if path == "/unsubscribe" and method == "POST":
-                data, now = _form_multidata(environ), datetime.now(timezone.utc)
+                data, now = _form_multidata(environ), self.clock()
                 customer_id, _ = consume_magic_link(connection, token=_last(data, "token"), now=now)
                 unsubscribe_customer(connection, customer_id=customer_id, now=now)
                 return self._respond(start_response, "200 OK", _page("已退訂", "<div class='card'><h1>已停止服務</h1><p>訂閱和未發送的配額提醒已停止。</p></div>"))
@@ -294,6 +300,13 @@ class WebApplication:
                 ("Cache-Control", "no-store"),
                 ("Referrer-Policy", "no-referrer"),
                 ("X-Content-Type-Options", "nosniff"),
+                ("X-Frame-Options", "DENY"),
+                ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+                (
+                    "Content-Security-Policy",
+                    "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+                ),
             ],
         )
         return [body]

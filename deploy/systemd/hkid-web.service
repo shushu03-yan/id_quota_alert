@@ -9,11 +9,12 @@ User=hkid-alert
 Group=hkid-alert
 WorkingDirectory=/opt/hkid-quota-alert
 EnvironmentFile=/etc/hkid-quota-alert.env
-ExecStart=/opt/hkid-quota-alert/.venv/bin/python -m app web --host 127.0.0.1 --port 8080
+ExecStart=/opt/hkid-quota-alert/.venv/bin/gunicorn --workers 2 --threads 2 --worker-class gthread --bind 127.0.0.1:8080 --timeout 30 --access-logfile - --error-logfile - app.wsgi:create_application()
 Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target

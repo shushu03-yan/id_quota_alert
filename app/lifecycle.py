@@ -370,7 +370,9 @@ def request_magic_link(
         """SELECT c.id AS customer_id, s.id AS subscription_id FROM customers c
            JOIN subscriptions s ON s.customer_id=c.id
            WHERE c.email_normalized=? AND c.unsubscribed_at IS NULL AND s.active=1
-           ORDER BY s.id DESC LIMIT 1""", (normalized,),
+           AND s.starts_at <= ? AND s.expires_at > ?
+           ORDER BY s.id DESC LIMIT 1""",
+        (normalized, _datetime_to_text(now), _datetime_to_text(now)),
     ).fetchone()
     if row is None:
         raise ValueError("active subscription not found")

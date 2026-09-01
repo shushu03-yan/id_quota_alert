@@ -49,6 +49,15 @@ def test_fetch_and_parse_failures_are_reported_separately(tmp_path):
     assert summary.values["429_count"] == 1
 
 
+def test_generic_5xx_and_source_regressions_are_counted(tmp_path):
+    connection = _db(tmp_path)
+    _observation(connection, "fetch_error", NOW - timedelta(minutes=2), "http_5xx")
+    _observation(connection, "rejected", NOW, "source_time_regression")
+    summary = build_soak_summary(connection)
+    assert summary.values["5xx_count"] == 1
+    assert summary.values["source_time_regression_count"] == 1
+
+
 def test_health_marks_old_success_as_stale(tmp_path):
     connection = _db(tmp_path)
     old = NOW - timedelta(minutes=10)

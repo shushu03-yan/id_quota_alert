@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 from urllib.parse import urlencode
 
 from app.admin import list_customers, outbox_status
 from app.lifecycle import create_activation_code
 from app.storage import connect_database, initialize_database
 from app.web import WebApplication
+from app.wsgi import create_application
 
 
 SECRET = "launch-skeleton-test-secret-with-more-than-32-characters"
@@ -101,3 +103,24 @@ def test_operator_views_mask_customer_email_and_handle_empty_outbox(tmp_path):
     assert "pilot.user@example.com" not in lines[0]
     assert outbox_status(connection) == ["outbox empty"]
     connection.close()
+
+
+def test_production_wsgi_factory_uses_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "production.sqlite3"))
+    monkeypatch.setenv("TOKEN_SIGNING_SECRET", "production-secret-with-at-least-32-characters")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://hkid-notice.com")
+    app = create_application()
+    assert app.database_path == tmp_path / "production.sqlite3"
+    assert app.public_base_url == "https://hkid-notice.com"
+
+
+def test_deployment_uses_gunicorn_nginx_and_daily_backups():
+    root = Path(__file__).parents[1]
+    web_unit = (root / "deploy/systemd/hkid-web.service").read_text(encoding="utf-8")
+    backup_timer = (root / "deploy/systemd/hkid-backup.timer").read_text(encoding="utf-8")
+    nginx = (root / "deploy/nginx/hkid-notice.conf").read_text(encoding="utf-8")
+    assert "gunicorn" in web_unit and "UMask=0027" in web_unit
+    assert "OnCalendar=" in backup_timer and "Persistent=true" in backup_timer
+    assert "server_name hkid-notice.com www.hkid-notice.com" in nginx
+    assert "proxy_pass http://127.0.0.1:8080" in nginx

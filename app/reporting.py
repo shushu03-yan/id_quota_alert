@@ -118,7 +118,12 @@ def build_soak_summary(connection: sqlite3.Connection) -> SoakSummary:
         "timeout_count": sum(v for k, v in errors.items() if "timeout" in k.lower()),
         "403_count": sum(v for k, v in errors.items() if "403" in k),
         "429_count": sum(v for k, v in errors.items() if "429" in k),
-        "5xx_count": sum(v for k, v in errors.items() if any(str(code) in k for code in range(500, 600))),
+        "5xx_count": sum(
+            v
+            for k, v in errors.items()
+            if k == "http_5xx" or any(str(code) in k for code in range(500, 600))
+        ),
+        "source_time_regression_count": errors.get("source_time_regression", 0),
         "quota_events_count": int(connection.execute("SELECT COUNT(*) FROM quota_events").fetchone()[0]),
         "current_state_count": int(connection.execute("SELECT COUNT(*) FROM quota_state").fetchone()[0]),
         "first_observation": "never" if first is None else first.isoformat().replace("+00:00", "Z"),
