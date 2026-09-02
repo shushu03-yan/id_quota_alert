@@ -1,0 +1,20 @@
+Appointment Notice｜獨立預約提醒服務
+
+發現預約名額變化
+
+我們偵測到與你所設定日期、辦事處及提醒門檻相符的新名額或狀態改善。
+
+辦事處：{{office}}
+日期：{{date}}
+名額狀態：{{availability}}
+偵測時間：{{detected_at}}
+
+GovHK 官方預約頁面：
+https://www.gov.hk/tc/residents/immigration/idcard/hkic/bookregidcard.htm
+
+名額可能很快變動。本服務只提供資訊提醒，不能預留名額、代為預約或保證預約成功。實際情況以 GovHK／入境事務處官方系統顯示為準。
+
+修改或停止提醒：
+https://hkid-notice.com/manage/request
+
+Appointment Notice 是獨立通知服務，並非香港特別行政區政府或入境事務處營運、認可或附屬服務。

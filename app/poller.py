@@ -41,6 +41,7 @@ class PollCycleResult:
     snapshot_applied: bool
     duplicate_snapshot: bool
     events_created: int
+    backoff_required: bool
     error_code: str | None = None
 
     @property
@@ -128,9 +129,11 @@ class QuotaPoller:
         previous_source_updated_at = _runtime_datetime(
             get_runtime_state(self.connection, "last_source_updated_at")
         )
+        previous_payload_hash = get_runtime_state(self.connection, "last_payload_hash")
         source_result = self.source.read(
             observed_at=observed_at,
             previous_source_updated_at=previous_source_updated_at,
+            previous_payload_hash=previous_payload_hash,
         )
 
         with self.connection:
@@ -150,6 +153,46 @@ class QuotaPoller:
                 source_result.observation.outcome.value,
                 updated_at=observed_at,
             )
+            if source_result.well_formed:
+                set_runtime_state(
+                    self.connection,
+                    "last_well_formed_poll",
+                    _runtime_datetime_text(observed_at),
+                    updated_at=observed_at,
+                )
+            if source_result.observation.source_updated_at is not None:
+                set_runtime_state(
+                    self.connection,
+                    "last_received_source_updated_at",
+                    _runtime_datetime_text(source_result.observation.source_updated_at),
+                    updated_at=observed_at,
+                )
+            if source_result.observation.outcome is ObservationOutcome.STALE:
+                set_runtime_state(
+                    self.connection,
+                    "last_stale_snapshot",
+                    _runtime_datetime_text(observed_at),
+                    updated_at=observed_at,
+                )
+                if previous_source_updated_at is not None:
+                    received_at = source_result.observation.source_updated_at
+                    assert received_at is not None
+                    regression_seconds = (
+                        previous_source_updated_at - received_at
+                    ).total_seconds()
+                    set_runtime_state(
+                        self.connection,
+                        "last_source_regression_seconds",
+                        f"{regression_seconds:.1f}",
+                        updated_at=observed_at,
+                    )
+            elif source_result.observation.error_code == "source_version_conflict":
+                set_runtime_state(
+                    self.connection,
+                    "last_source_version_conflict",
+                    _runtime_datetime_text(observed_at),
+                    updated_at=observed_at,
+                )
 
             if not source_result.successful:
                 return PollCycleResult(
@@ -159,6 +202,7 @@ class QuotaPoller:
                     snapshot_applied=False,
                     duplicate_snapshot=False,
                     events_created=0,
+                    backoff_required=source_result.should_backoff,
                     error_code=source_result.observation.error_code,
                 )
 
@@ -202,6 +246,7 @@ class QuotaPoller:
                     snapshot_applied=False,
                     duplicate_snapshot=True,
                     events_created=0,
+                    backoff_required=False,
                 )
 
             previous_states = load_quota_states(self.connection)
@@ -234,6 +279,7 @@ class QuotaPoller:
                 snapshot_applied=True,
                 duplicate_snapshot=False,
                 events_created=len(event_ids),
+                backoff_required=False,
             )
 
     def run_forever(
@@ -250,10 +296,10 @@ class QuotaPoller:
         consecutive_failures = 0
         while True:
             result = self.run_once()
-            if result.successful:
-                consecutive_failures = 0
-            else:
+            if result.backoff_required:
                 consecutive_failures += 1
+            else:
+                consecutive_failures = 0
 
             delay = calculate_poll_delay(
                 interval_seconds=interval_seconds,
@@ -263,11 +309,12 @@ class QuotaPoller:
                 jitter_fraction=random_fraction(),
             )
             logger.info(
-                "quota poll outcome=%s applied=%s duplicate=%s events=%d error=%s next_poll_in=%.1fs",
+                "quota poll outcome=%s applied=%s duplicate=%s events=%d backoff=%s error=%s next_poll_in=%.1fs",
                 result.outcome.value,
                 result.snapshot_applied,
                 result.duplicate_snapshot,
                 result.events_created,
+                result.backoff_required,
                 result.error_code or "-",
                 delay,
             )

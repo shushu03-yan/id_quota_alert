@@ -12,7 +12,7 @@ import os
 import sqlite3
 
 from .config import validate_token_signing_secret
-from .email_provider import EmailDeliveryResult, EmailProvider
+from .email_provider import EmailDeliveryRequest, EmailDeliveryResult, EmailProvider
 from .storage import _datetime_to_text, initialize_database, set_runtime_state
 
 
@@ -98,7 +98,12 @@ def match_quota_event(connection: sqlite3.Connection, event_id: int, *, now: dat
                 notification_kind="quota_alert",
                 dedup_key=f"quota_alert:{row['subscription_id']}:{event_id}:{recipient}",
                 recipient_email=recipient,
-                payload={"quota_date": event["quota_date"], "office_id": event["office_id"], "status": event["to_status"]},
+                payload={
+                    "quota_date": event["quota_date"],
+                    "office_id": event["office_id"],
+                    "status": event["to_status"],
+                    "detected_at": event["observed_at"],
+                },
                 created_at=now,
                 subscription_id=int(row["subscription_id"]),
                 quota_event_id=event_id,
@@ -178,30 +183,63 @@ def claim_notification(
         raise
 
 
-def _message_for(item: ClaimedNotification) -> tuple[str, str]:
+def _signed_delivery_token(*, purpose: str, record_id: int) -> str:
+    secret = validate_token_signing_secret(
+        os.getenv("TOKEN_SIGNING_SECRET", ""), app_env=os.getenv("APP_ENV", "development")
+    )
+    identifier = base64.urlsafe_b64encode(str(record_id).encode()).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), f"{purpose}:{identifier}".encode(), hashlib.sha256).digest()
+    return f"{identifier}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+
+
+def _delivery_request_for(item: ClaimedNotification) -> EmailDeliveryRequest:
     if item.kind == "activation_test":
-        return "你的 HKID Alert 已成功启动", str(item.payload.get("message", "这是一封服务启动确认邮件，不是实际配额提醒，不代表现在有预约名额。"))
+        return EmailDeliveryRequest(
+            recipient=item.recipient,
+            subject="你的預約提醒服務已啟動",
+            template_kind=item.kind,
+            template_data={
+                "plan_name": str(item.payload.get("plan_name", "-")),
+                "starts_on": str(item.payload.get("starts_on", "-")),
+                "expires_on": str(item.payload.get("expires_on", "-")),
+                "target_count": str(item.payload.get("target_count", "-")),
+            },
+        )
     if item.kind == "verify_email":
-        secret = validate_token_signing_secret(
-            os.getenv("TOKEN_SIGNING_SECRET", ""), app_env=os.getenv("APP_ENV", "development")
+        return EmailDeliveryRequest(
+            recipient=item.recipient,
+            subject="驗證你的預約提醒郵箱",
+            template_kind=item.kind,
+            template_data={
+                "verify_token": _signed_delivery_token(
+                    purpose="verify", record_id=int(item.payload["verification_id"])
+                )
+            },
         )
-        record_id = int(item.payload["verification_id"])
-        identifier = base64.urlsafe_b64encode(str(record_id).encode()).decode().rstrip("=")
-        signature = hmac.new(secret.encode(), f"verify:{identifier}".encode(), hashlib.sha256).digest()
-        token = f"{identifier}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
-        url = f"{str(item.payload['base_url']).rstrip('/')}/verify?token={token}"
-        return "验证你的 HKID Alert 邮箱", f"请打开验证链接：{url}"
     if item.kind == "manage_link":
-        secret = validate_token_signing_secret(
-            os.getenv("TOKEN_SIGNING_SECRET", ""), app_env=os.getenv("APP_ENV", "development")
+        return EmailDeliveryRequest(
+            recipient=item.recipient,
+            subject="管理你的預約提醒",
+            template_kind=item.kind,
+            template_data={
+                "manage_token": _signed_delivery_token(
+                    purpose="manage", record_id=int(item.payload["magic_link_id"])
+                )
+            },
         )
-        record_id = int(item.payload["magic_link_id"])
-        identifier = base64.urlsafe_b64encode(str(record_id).encode()).decode().rstrip("=")
-        signature = hmac.new(secret.encode(), f"manage:{identifier}".encode(), hashlib.sha256).digest()
-        token = f"{identifier}.{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
-        url = f"{str(item.payload['base_url']).rstrip('/')}/manage?token={token}"
-        return "管理你的 HKID Alert", f"请打开管理链接：{url}"
-    return "HKID 公开预约配额变化提醒", f"日期：{item.payload.get('quota_date')}\n办事处：{item.payload.get('office_id')}\n状态：{item.payload.get('status')}\n\n请自行进入官方系统预约。本服务并非香港政府官方服务。"
+    if item.kind == "quota_alert":
+        return EmailDeliveryRequest(
+            recipient=item.recipient,
+            subject="預約名額變化提醒",
+            template_kind=item.kind,
+            template_data={
+                "office": str(item.payload.get("office_id", "-")),
+                "date": str(item.payload.get("quota_date", "-")),
+                "availability": str(item.payload.get("status", "-")),
+                "detected_at": str(item.payload.get("detected_at", "-")),
+            },
+        )
+    raise ValueError(f"unsupported notification kind: {item.kind}")
 
 
 RETRY_DELAYS = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15), timedelta(hours=1))
@@ -231,8 +269,7 @@ class EmailWorker:
                 )
                 self.connection.commit()
                 return True
-        subject, text = _message_for(item)
-        result = self.provider.send(recipient=item.recipient, subject=subject, text=text)
+        result = self.provider.send(_delivery_request_for(item))
         self._finish(item, result, now)
         return True
 

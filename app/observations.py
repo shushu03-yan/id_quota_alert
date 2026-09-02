@@ -13,6 +13,7 @@ from enum import StrEnum
 
 class ObservationOutcome(StrEnum):
     SUCCESS = "success"
+    STALE = "stale"
     FETCH_ERROR = "fetch_error"
     PARSE_ERROR = "parse_error"
     REJECTED = "rejected"

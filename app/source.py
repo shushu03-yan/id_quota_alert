@@ -1,9 +1,9 @@
 """GovHK / Immigration Department public quota source adapter.
 
 The source layer is deliberately fail-closed. HTTP failures, malformed JSON, unknown
-quota status tokens, incomplete office/date coverage, and source timestamp regressions
-produce failed observations and never a ``ValidatedSnapshot`` that could mutate
-confirmed quota state.
+quota status tokens and incomplete office/date coverage produce failed observations.
+A complete but older source snapshot is recorded as stale and never returned as a
+``ValidatedSnapshot`` that could mutate confirmed quota state.
 
 The public quota preview currently uses service id 579 and the ``getSituation`` JSON
 endpoint. All users must share one poller calling this adapter; this module is not a
@@ -76,6 +76,25 @@ class SourceReadResult:
     @property
     def successful(self) -> bool:
         return self.snapshot is not None and self.observation.may_update_state
+
+    @property
+    def well_formed(self) -> bool:
+        """Whether the endpoint returned a complete, parseable quota matrix."""
+
+        return self.observation.outcome in {
+            ObservationOutcome.SUCCESS,
+            ObservationOutcome.STALE,
+        } or self.observation.error_code == "source_version_conflict"
+
+    @property
+    def should_backoff(self) -> bool:
+        """Back off only for transport, parsing, or unsafe structural failures."""
+
+        if self.observation.outcome is ObservationOutcome.STALE:
+            return False
+        if self.observation.error_code == "source_version_conflict":
+            return False
+        return not self.successful
 
 
 Transport = Callable[[str, float, Mapping[str, str]], SourceHttpResponse]
@@ -202,7 +221,6 @@ class GovHKQuotaParser:
         *,
         observed_at: datetime,
         payload_hash: str,
-        previous_source_updated_at: datetime | None = None,
     ) -> ValidatedSnapshot:
         try:
             text = body.decode("utf-8-sig")
@@ -237,18 +255,6 @@ class GovHKQuotaParser:
             office_ids.add(office_id)
 
         source_updated_at = _parse_source_updated_at(payload.get("lastUpdateTime"))
-        if previous_source_updated_at is not None:
-            if (
-                previous_source_updated_at.tzinfo is None
-                or previous_source_updated_at.utcoffset() is None
-            ):
-                raise ValueError("previous_source_updated_at must be timezone-aware")
-            if source_updated_at is not None and source_updated_at < previous_source_updated_at:
-                raise SourceRejectedError(
-                    "source update time moved backwards",
-                    code="source_time_regression",
-                )
-
         entries: list[QuotaEntry] = []
         dates: set[date] = set()
         for row in rows:
@@ -346,10 +352,16 @@ class GovHKQuotaSourceAdapter:
         *,
         observed_at: datetime | None = None,
         previous_source_updated_at: datetime | None = None,
+        previous_payload_hash: str | None = None,
     ) -> SourceReadResult:
         observed_at = observed_at or datetime.now(timezone.utc)
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             raise ValueError("observed_at must be timezone-aware")
+        if previous_source_updated_at is not None and (
+            previous_source_updated_at.tzinfo is None
+            or previous_source_updated_at.utcoffset() is None
+        ):
+            raise ValueError("previous_source_updated_at must be timezone-aware")
 
         headers = {
             "Accept": "application/json,text/plain,*/*",
@@ -403,7 +415,6 @@ class GovHKQuotaSourceAdapter:
                 body,
                 observed_at=observed_at,
                 payload_hash=payload_hash,
-                previous_source_updated_at=previous_source_updated_at,
             )
         except SourceParseError as exc:
             return self._failure(
@@ -423,6 +434,29 @@ class GovHKQuotaSourceAdapter:
             )
 
         office_count = len({entry.key.office_id for entry in snapshot.entries})
+        if (
+            previous_source_updated_at is not None
+            and snapshot.source_updated_at is not None
+        ):
+            if snapshot.source_updated_at < previous_source_updated_at:
+                return self._validated_rejection(
+                    snapshot,
+                    outcome=ObservationOutcome.STALE,
+                    error_code="source_time_regression",
+                    office_count=office_count,
+                )
+            if (
+                snapshot.source_updated_at == previous_source_updated_at
+                and previous_payload_hash is not None
+                and snapshot.payload_hash != previous_payload_hash
+            ):
+                return self._validated_rejection(
+                    snapshot,
+                    outcome=ObservationOutcome.REJECTED,
+                    error_code="source_version_conflict",
+                    office_count=office_count,
+                )
+
         observation = QuotaObservation(
             observed_at=observed_at,
             outcome=ObservationOutcome.SUCCESS,
@@ -433,6 +467,30 @@ class GovHKQuotaSourceAdapter:
             quota_count=len(snapshot.entries),
         )
         return SourceReadResult(observation=observation, snapshot=snapshot)
+
+    @staticmethod
+    def _validated_rejection(
+        snapshot: ValidatedSnapshot,
+        *,
+        outcome: ObservationOutcome,
+        error_code: str,
+        office_count: int,
+    ) -> SourceReadResult:
+        """Keep audit metadata for a complete snapshot that is unsafe to apply."""
+
+        return SourceReadResult(
+            observation=QuotaObservation(
+                observed_at=snapshot.observed_at,
+                outcome=outcome,
+                source_updated_at=snapshot.source_updated_at,
+                payload_hash=snapshot.payload_hash,
+                parser_version=snapshot.parser_version,
+                office_count=office_count,
+                quota_count=len(snapshot.entries),
+                error_code=error_code,
+            ),
+            snapshot=None,
+        )
 
     @staticmethod
     def _failure(

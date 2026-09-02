@@ -32,7 +32,7 @@ def test_activation_verify_manage_and_unsubscribe_routes(tmp_path):
     initialize_database(connection)
     code = create_activation_code(connection, plan_code="trial", now=NOW)
     vid = begin_activation(connection, code=code, email="u@example.com", targets=TARGET,
-                           now=NOW, base_url="https://example.test", signing_secret=SECRET)
+                           now=NOW, signing_secret=SECRET)
     token = verification_token(vid, signing_secret=SECRET)
     app = WebApplication(
         path, signing_secret=SECRET, public_base_url="https://example.test",
@@ -55,7 +55,7 @@ def test_magic_link_target_update_uses_strict_date_validation(tmp_path):
     code = create_activation_code(connection, plan_code="goal", now=NOW)
     vid = begin_activation(
         connection, code=code, email="u@example.com", targets=TARGET,
-        now=NOW, base_url="https://example.test", signing_secret=SECRET,
+        now=NOW, signing_secret=SECRET,
     )
     sub_id = verify_activation(
         connection, token=verification_token(vid, signing_secret=SECRET), now=NOW + timedelta(minutes=1)

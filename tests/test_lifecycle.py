@@ -30,7 +30,7 @@ def test_activation_code_is_random_one_time_and_only_hash_is_stored(tmp_path):
     assert row[0] == hash_secret(code)
     assert code not in row[0]
     verification_id = begin_activation(connection, code=code, email="User@Example.com", targets=TARGET,
-        now=NOW, base_url="https://example.test", signing_secret=SECRET)
+        now=NOW, signing_secret=SECRET)
     token = verification_token(verification_id, signing_secret=SECRET)
     subscription_id = verify_activation(connection, token=token, now=NOW + timedelta(minutes=1))
     assert subscription_id > 0
@@ -52,7 +52,7 @@ def test_verification_and_magic_tokens_are_not_stored_in_plaintext(tmp_path):
     connection = _db(tmp_path)
     code = create_activation_code(connection, plan_code="goal", now=NOW)
     verification_id = begin_activation(connection, code=code, email="u@example.com", targets=TARGET,
-        now=NOW, base_url="https://example.test", signing_secret=SECRET)
+        now=NOW, signing_secret=SECRET)
     token = verification_token(verification_id, signing_secret=SECRET)
     assert connection.execute("SELECT token_hash FROM email_verification_tokens").fetchone()[0] == hash_secret(token)
     sub_id = verify_activation(connection, token=token, now=NOW + timedelta(minutes=1))
@@ -93,7 +93,7 @@ def test_begin_activation_rejects_fully_expired_target(tmp_path):
         begin_activation(
             connection, code=code, email="u@example.com",
             targets=[dict(TARGET[0], earliest_date="2026-08-01", deadline="2026-08-27")],
-            now=NOW, base_url="https://example.test", signing_secret=SECRET,
+            now=NOW, signing_secret=SECRET,
         )
 
 
@@ -104,7 +104,7 @@ def test_verify_activation_rejects_target_that_expired_while_waiting(tmp_path):
     verification_id = begin_activation(
         connection, code=code, email="u@example.com",
         targets=[dict(TARGET[0], earliest_date="2026-08-28", deadline="2026-08-28")],
-        now=late_hong_kong_evening, base_url="https://example.test", signing_secret=SECRET,
+        now=late_hong_kong_evening, signing_secret=SECRET,
     )
     with pytest.raises(ValueError, match="deadline has already passed"):
         verify_activation(
@@ -124,12 +124,12 @@ def test_two_connections_cannot_reserve_same_code_for_different_customers(tmp_pa
 
     begin_activation(
         first, code=code, email="one@example.com", targets=TARGET, now=NOW,
-        base_url="https://example.test", signing_secret=SECRET,
+        signing_secret=SECRET,
     )
     with pytest.raises(ValueError, match="reserved"):
         begin_activation(
             second, code=code, email="two@example.com", targets=TARGET, now=NOW,
-            base_url="https://example.test", signing_secret=SECRET,
+            signing_secret=SECRET,
         )
     owner = second.execute("""SELECT c.email_normalized FROM activation_codes a
         JOIN customers c ON c.id=a.reserved_customer_id""").fetchone()[0]
@@ -143,13 +143,13 @@ def test_expired_reservation_can_be_reacquired_and_old_owner_cannot_verify(tmp_p
     code = create_activation_code(first, plan_code="goal", now=NOW)
     first_id = begin_activation(
         first, code=code, email="one@example.com", targets=TARGET, now=NOW,
-        base_url="https://example.test", signing_secret=SECRET, verification_ttl=timedelta(minutes=1),
+        signing_secret=SECRET, verification_ttl=timedelta(minutes=1),
     )
     second = connect_database(path)
     initialize_database(second)
     second_id = begin_activation(
         second, code=code, email="two@example.com", targets=TARGET, now=NOW + timedelta(minutes=2),
-        base_url="https://example.test", signing_secret=SECRET,
+        signing_secret=SECRET,
     )
     with pytest.raises(ValueError, match="does not own"):
         verify_activation(
@@ -167,25 +167,26 @@ def test_trial_can_only_be_redeemed_once_per_email(tmp_path):
     first = create_activation_code(connection, plan_code="trial", now=NOW)
     target = [dict(TARGET[0], offices=["sha-tin"])]
     verification_id = begin_activation(connection, code=first, email="u@example.com", targets=target,
-        now=NOW, base_url="https://example.test", signing_secret=SECRET)
+        now=NOW, signing_secret=SECRET)
     verify_activation(connection, token=verification_token(verification_id, signing_secret=SECRET), now=NOW + timedelta(minutes=1))
     second = create_activation_code(connection, plan_code="trial", now=NOW)
     with pytest.raises(ValueError, match="trial already used"):
         begin_activation(connection, code=second, email="U@example.com", targets=target,
-            now=NOW, base_url="https://example.test", signing_secret=SECRET)
+            now=NOW, signing_secret=SECRET)
 
 
-def test_activation_queues_clear_test_email_and_preserves_target_group(tmp_path):
+def test_activation_queues_structured_template_data_and_preserves_target_group(tmp_path):
     connection = _db(tmp_path)
     code = create_activation_code(connection, plan_code="goal", now=NOW)
     verification_id = begin_activation(connection, code=code, email="u@example.com", targets=TARGET,
-        now=NOW, base_url="https://example.test", signing_secret=SECRET)
+        now=NOW, signing_secret=SECRET)
     sub_id = verify_activation(connection, token=verification_token(verification_id, signing_secret=SECRET), now=NOW + timedelta(minutes=1))
     rows = connection.execute("SELECT target_key,office_id FROM subscription_filters WHERE subscription_id=?", (sub_id,)).fetchall()
     assert {tuple(row) for row in rows} == {("a", "sha-tin"), ("a", "fo-tan")}
     outbox = connection.execute("SELECT notification_kind,payload_json FROM notification_outbox WHERE subscription_id=?", (sub_id,)).fetchone()
     assert outbox[0] == "activation_test"
-    assert "不是实际配额提醒" in outbox[1]
+    assert '"plan_name":"Goal"' in outbox[1]
+    assert '"target_count":1' in outbox[1]
 
 
 def test_zero_match_guarantee_extends_goal_once_only(tmp_path):
@@ -242,7 +243,7 @@ def test_unsubscribe_deactivates_and_cancels_pending_quota_mail(tmp_path):
     connection = _db(tmp_path)
     code = create_activation_code(connection, plan_code="goal", now=NOW)
     vid = begin_activation(connection, code=code, email="u@example.com", targets=TARGET, now=NOW,
-                           base_url="https://example.test", signing_secret=SECRET)
+                           signing_secret=SECRET)
     sub_id = verify_activation(connection, token=verification_token(vid, signing_secret=SECRET), now=NOW + timedelta(minutes=1))
     customer_id = connection.execute("SELECT customer_id FROM subscriptions WHERE id=?", (sub_id,)).fetchone()[0]
     connection.execute("UPDATE notification_outbox SET notification_kind='quota_alert' WHERE subscription_id=?", (sub_id,))
@@ -256,7 +257,7 @@ def test_family_supports_three_recipients_but_other_plans_do_not(tmp_path):
     connection = _db(tmp_path)
     code = create_activation_code(connection, plan_code="family", now=NOW)
     vid = begin_activation(connection, code=code, email="one@example.com", targets=TARGET, now=NOW,
-                           base_url="https://example.test", signing_secret=SECRET)
+                           signing_secret=SECRET)
     sub_id = verify_activation(connection, token=verification_token(vid, signing_secret=SECRET), now=NOW + timedelta(minutes=1))
     assert add_subscription_recipient(connection, subscription_id=sub_id, email="two@example.com", now=NOW)
     assert add_subscription_recipient(connection, subscription_id=sub_id, email="three@example.com", now=NOW)
@@ -268,13 +269,14 @@ def test_manage_link_email_queues_only_record_id_not_plain_token(tmp_path):
     connection = _db(tmp_path)
     code = create_activation_code(connection, plan_code="goal", now=NOW)
     vid = begin_activation(connection, code=code, email="u@example.com", targets=TARGET, now=NOW,
-                           base_url="https://example.test", signing_secret=SECRET)
+                           signing_secret=SECRET)
     verify_activation(connection, token=verification_token(vid, signing_secret=SECRET), now=NOW + timedelta(minutes=1))
     token_id = request_magic_link(connection, email="u@example.com", now=NOW + timedelta(minutes=2),
-                                  signing_secret=SECRET, base_url="https://example.test")
+                                  signing_secret=SECRET)
     payload = connection.execute("SELECT payload_json FROM notification_outbox WHERE notification_kind='manage_link'").fetchone()[0]
     assert f'"magic_link_id":{token_id}' in payload
     assert "token=" not in payload
+    assert "http" not in payload
 
 
 def test_expired_subscription_cannot_request_management_link(tmp_path):
@@ -282,7 +284,7 @@ def test_expired_subscription_cannot_request_management_link(tmp_path):
     code = create_activation_code(connection, plan_code="goal", now=NOW)
     verification_id = begin_activation(
         connection, code=code, email="u@example.com", targets=TARGET,
-        now=NOW, base_url="https://example.test", signing_secret=SECRET,
+        now=NOW, signing_secret=SECRET,
     )
     subscription_id = verify_activation(
         connection,
@@ -297,5 +299,5 @@ def test_expired_subscription_cannot_request_management_link(tmp_path):
     with pytest.raises(ValueError, match="active subscription not found"):
         request_magic_link(
             connection, email="u@example.com", now=NOW + timedelta(minutes=3),
-            signing_secret=SECRET, base_url="https://example.test",
+            signing_secret=SECRET,
         )

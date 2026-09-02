@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 
 from app.observations import ObservationOutcome
@@ -202,7 +203,7 @@ def test_timeout_is_a_fetch_error() -> None:
     assert result.observation.error_code == "timeout"
 
 
-def test_source_update_time_regression_is_rejected() -> None:
+def test_source_update_time_regression_is_recorded_as_stale() -> None:
     adapter, _ = adapter_for(SourceHttpResponse(200, payload_bytes()))
     previous = datetime(2026, 8, 28, 0, 0, tzinfo=timezone.utc)
 
@@ -212,8 +213,53 @@ def test_source_update_time_regression_is_rejected() -> None:
     )
 
     assert result.snapshot is None
-    assert result.observation.outcome is ObservationOutcome.REJECTED
+    assert result.observation.outcome is ObservationOutcome.STALE
     assert result.observation.error_code == "source_time_regression"
+    assert result.observation.source_updated_at == datetime(
+        2026, 8, 27, 23, 59, tzinfo=timezone.utc
+    )
+    assert result.observation.office_count == 2
+    assert result.observation.quota_count == 4
+    assert result.well_formed is True
+    assert result.should_backoff is False
+
+
+def test_same_source_time_with_different_payload_is_rejected_as_conflict() -> None:
+    adapter, _ = adapter_for(SourceHttpResponse(200, payload_bytes()))
+
+    result = adapter.read(
+        observed_at=OBSERVED_AT + timedelta(minutes=1),
+        previous_source_updated_at=datetime(
+            2026, 8, 27, 23, 59, tzinfo=timezone.utc
+        ),
+        previous_payload_hash="different-accepted-payload",
+    )
+
+    assert result.snapshot is None
+    assert result.observation.outcome is ObservationOutcome.REJECTED
+    assert result.observation.error_code == "source_version_conflict"
+    assert result.observation.source_updated_at == datetime(
+        2026, 8, 27, 23, 59, tzinfo=timezone.utc
+    )
+    assert result.well_formed is True
+    assert result.should_backoff is False
+
+
+def test_same_source_time_with_same_payload_remains_a_successful_duplicate() -> None:
+    body = payload_bytes()
+    adapter, _ = adapter_for(SourceHttpResponse(200, body))
+
+    result = adapter.read(
+        observed_at=OBSERVED_AT + timedelta(minutes=1),
+        previous_source_updated_at=datetime(
+            2026, 8, 27, 23, 59, tzinfo=timezone.utc
+        ),
+        previous_payload_hash=hashlib.sha256(body).hexdigest(),
+    )
+
+    assert result.successful is True
+    assert result.observation.outcome is ObservationOutcome.SUCCESS
+    assert result.should_backoff is False
 
 
 def test_missing_office_catalog_is_not_accepted() -> None:

@@ -35,7 +35,7 @@ def test_schema_contains_observation_state_event_and_outbox_tables(tmp_path) -> 
         "orders",
     }.issubset(tables)
 
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_v1_product_fields_are_present(tmp_path) -> None:
@@ -189,7 +189,7 @@ def test_v1_database_can_be_upgraded_to_current_schema(tmp_path) -> None:
 
     initialize_database(connection)
 
-    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
     assert "trial_used_at" in _columns(connection, "customers")
     assert "guarantee_extended_at" in _columns(connection, "subscriptions")
     assert "target_key" in _columns(connection, "subscription_filters")
@@ -234,3 +234,47 @@ def test_v2_outbox_is_migrated_without_losing_rows_or_attempts(tmp_path) -> None
     assert connection.execute("SELECT result,error_code FROM delivery_attempts").fetchone()[:] == ("retryable_failure", "timeout")
     initialize_database(connection)
     assert connection.execute("SELECT COUNT(*) FROM notification_outbox").fetchone()[0] == 1
+
+
+def test_v3_timestamp_regressions_are_migrated_to_stale(tmp_path) -> None:
+    connection = connect_database(tmp_path / "legacy-v3.sqlite3")
+    connection.executescript(
+        """
+        CREATE TABLE quota_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK (outcome IN
+                ('success', 'fetch_error', 'parse_error', 'rejected')),
+            source_updated_at TEXT,
+            payload_hash TEXT,
+            parser_version TEXT,
+            office_count INTEGER NOT NULL DEFAULT 0,
+            quota_count INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT
+        );
+        CREATE INDEX idx_quota_observations_observed_at
+        ON quota_observations(observed_at);
+        INSERT INTO quota_observations(
+            observed_at, outcome, payload_hash, parser_version, error_code
+        ) VALUES (
+            '2026-09-02T00:00:00Z', 'rejected', 'old-hash',
+            'govhk-get-situation-v1', 'source_time_regression'
+        );
+        PRAGMA user_version = 3;
+        """
+    )
+    connection.commit()
+
+    initialize_database(connection)
+
+    row = connection.execute(
+        "SELECT id, outcome, payload_hash, error_code FROM quota_observations"
+    ).fetchone()
+    assert tuple(row) == (1, "stale", "old-hash", "source_time_regression")
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+    connection.execute(
+        """
+        INSERT INTO quota_observations(observed_at, outcome, error_code)
+        VALUES ('2026-09-02T00:01:00Z', 'stale', 'source_time_regression')
+        """
+    )

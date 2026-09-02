@@ -142,7 +142,7 @@ def _signed_token(record_id: int, *, purpose: str, secret: str) -> str:
 
 def begin_activation(
     connection: sqlite3.Connection, *, code: str, email: str,
-    targets: Iterable[dict[str, object]], now: datetime, base_url: str,
+    targets: Iterable[dict[str, object]], now: datetime,
     signing_secret: str, verification_ttl: timedelta = timedelta(hours=1),
 ) -> int:
     """Reserve a code and queue verification; neither code nor token plaintext is persisted."""
@@ -197,7 +197,7 @@ def begin_activation(
         queue_notification(
             connection, notification_kind="verify_email", dedup_key=f"verify_email:{verification_id}",
             recipient_email=normalized_email,
-            payload={"base_url": base_url.rstrip("/"), "verification_id": verification_id}, created_at=now,
+            payload={"verification_id": verification_id}, created_at=now,
         )
         connection.execute("RELEASE SAVEPOINT begin_activation")
         connection.commit()
@@ -259,15 +259,16 @@ def verify_activation(connection: sqlite3.Connection, *, token: str, now: dateti
     if plan.code == "trial":
         connection.execute("UPDATE customers SET trial_used_at=COALESCE(trial_used_at, ?) WHERE id=?", (_datetime_to_text(now), row["customer_id"]))
     customer = connection.execute("SELECT email_normalized FROM customers WHERE id=?", (row["customer_id"],)).fetchone()
-    message = (f"你的 HKID Alert 已成功启动\n\n套餐：{plan.code.title()}\n"
-               f"有效期：{now.date().isoformat()} ～ {expires_at.date().isoformat()}\n"
-               f"预约目标：已设置 {len(targets)} / {plan.max_targets}\n\n"
-               "这是一封服务启动确认邮件，不是实际配额提醒，不代表现在有预约名额。\n"
-               "后续检测到符合目标的公开名额变化时会发送提醒。\n"
-               "本服务并非香港政府官方服务；收到提醒后仍需自行进入官方系统预约。")
     queue_notification(
         connection, notification_kind="activation_test", dedup_key=f"activation_test:{subscription_id}",
-        recipient_email=str(customer[0]), payload={"message": message}, created_at=now,
+        recipient_email=str(customer[0]),
+        payload={
+            "plan_name": plan.code.title(),
+            "starts_on": now.date().isoformat(),
+            "expires_on": expires_at.date().isoformat(),
+            "target_count": len(targets),
+        },
+        created_at=now,
         subscription_id=subscription_id,
     )
     connection.commit()
@@ -361,7 +362,7 @@ def consume_magic_link(connection: sqlite3.Connection, *, token: str, now: datet
 
 def request_magic_link(
     connection: sqlite3.Connection, *, email: str, now: datetime,
-    signing_secret: str, base_url: str,
+    signing_secret: str,
 ) -> int:
     """Queue a management link while persisting only its deterministic hash."""
     initialize_database(connection)
@@ -380,7 +381,7 @@ def request_magic_link(
         subscription_id=int(row["subscription_id"]), now=now, signing_secret=signing_secret)
     queue_notification(
         connection, notification_kind="manage_link", dedup_key=f"manage_link:{token_id}",
-        recipient_email=normalized, payload={"base_url": base_url.rstrip("/"), "magic_link_id": token_id},
+        recipient_email=normalized, payload={"magic_link_id": token_id},
         created_at=now, subscription_id=int(row["subscription_id"]),
     )
     connection.commit()

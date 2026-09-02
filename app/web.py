@@ -180,7 +180,7 @@ class WebApplication:
                 begin_activation(
                     connection, code=_last(data, "code"), email=_last(data, "email"),
                     targets=_targets_from_form(data), now=self.clock(),
-                    base_url=self.public_base_url, signing_secret=self.signing_secret,
+                    signing_secret=self.signing_secret,
                 )
                 return self._respond(start_response, "202 Accepted", _page("請驗證 Email", "<div class='card'><h1>檢查你的 Email</h1><p>驗證郵件已進入發送隊列。只有完成 Email 驗證後，套餐計時才會開始。</p></div>"))
 
@@ -200,7 +200,7 @@ class WebApplication:
                 try:
                     request_magic_link(
                         connection, email=_last(data, "email"), now=self.clock(),
-                        signing_secret=self.signing_secret, base_url=self.public_base_url,
+                        signing_secret=self.signing_secret,
                     )
                 except ValueError:
                     pass

@@ -27,6 +27,7 @@ def test_health_and_soak_report_have_explicit_empty_state(tmp_path):
     soak = build_soak_summary(connection)
     assert health.values["observation_count"] == 0
     assert health.poller_status == "NOT RUN"
+    assert health.source_response_status == "NOT RUN"
     assert "SOAK TEST NOT COMPLETE" in soak.render()
 
 
@@ -49,23 +50,43 @@ def test_fetch_and_parse_failures_are_reported_separately(tmp_path):
     assert summary.values["429_count"] == 1
 
 
-def test_generic_5xx_and_source_regressions_are_counted(tmp_path):
+def test_generic_5xx_and_stale_source_regressions_are_counted(tmp_path):
     connection = _db(tmp_path)
     _observation(connection, "fetch_error", NOW - timedelta(minutes=2), "http_5xx")
-    _observation(connection, "rejected", NOW, "source_time_regression")
+    _observation(connection, "stale", NOW, "source_time_regression")
     summary = build_soak_summary(connection)
     assert summary.values["5xx_count"] == 1
     assert summary.values["source_time_regression_count"] == 1
+    assert summary.values["stale_percent"] == "50.00%"
 
 
 def test_health_marks_old_success_as_stale(tmp_path):
     connection = _db(tmp_path)
     old = NOW - timedelta(minutes=10)
+    set_runtime_state(connection, "last_poll_attempt", old.isoformat().replace("+00:00", "Z"), updated_at=old)
+    set_runtime_state(connection, "last_well_formed_poll", old.isoformat().replace("+00:00", "Z"), updated_at=old)
     set_runtime_state(connection, "last_successful_poll", old.isoformat().replace("+00:00", "Z"), updated_at=old)
     set_runtime_state(connection, "last_valid_snapshot", old.isoformat().replace("+00:00", "Z"), updated_at=old)
     connection.commit()
     report = build_health_report(connection, now=NOW, stale_after=timedelta(minutes=5))
     assert report.poller_status == "STALE"
+    assert report.source_response_status == "STALE"
+    assert report.source_status == "STALE"
+
+
+def test_recent_stale_response_keeps_poller_and_transport_healthy(tmp_path):
+    connection = _db(tmp_path)
+    old = NOW - timedelta(minutes=10)
+    recent = NOW - timedelta(minutes=1)
+    set_runtime_state(connection, "last_poll_attempt", recent.isoformat().replace("+00:00", "Z"), updated_at=recent)
+    set_runtime_state(connection, "last_well_formed_poll", recent.isoformat().replace("+00:00", "Z"), updated_at=recent)
+    set_runtime_state(connection, "last_valid_snapshot", old.isoformat().replace("+00:00", "Z"), updated_at=old)
+    connection.commit()
+
+    report = build_health_report(connection, now=NOW, stale_after=timedelta(minutes=5))
+
+    assert report.poller_status == "HEALTHY"
+    assert report.source_response_status == "HEALTHY"
     assert report.source_status == "STALE"
 
 

@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS runtime_state (
 CREATE TABLE IF NOT EXISTS quota_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
-    outcome TEXT NOT NULL CHECK (outcome IN ('success', 'fetch_error', 'parse_error', 'rejected')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('success', 'stale', 'fetch_error', 'parse_error', 'rejected')),
     source_updated_at TEXT,
     payload_hash TEXT,
     parser_version TEXT,
@@ -379,6 +379,55 @@ def _ensure_v3_indexes(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+    """Add the stale outcome and reclassify historical timestamp regressions."""
+
+    connection.execute("DROP INDEX IF EXISTS idx_quota_observations_observed_at")
+    connection.execute(
+        "ALTER TABLE quota_observations RENAME TO quota_observations_v3"
+    )
+    connection.execute(
+        """
+        CREATE TABLE quota_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK (outcome IN
+                ('success', 'stale', 'fetch_error', 'parse_error', 'rejected')),
+            source_updated_at TEXT,
+            payload_hash TEXT,
+            parser_version TEXT,
+            office_count INTEGER NOT NULL DEFAULT 0 CHECK (office_count >= 0),
+            quota_count INTEGER NOT NULL DEFAULT 0 CHECK (quota_count >= 0),
+            error_code TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO quota_observations(
+            id, observed_at, outcome, source_updated_at, payload_hash,
+            parser_version, office_count, quota_count, error_code
+        )
+        SELECT id, observed_at,
+               CASE
+                   WHEN outcome = 'rejected' AND error_code = 'source_time_regression'
+                   THEN 'stale'
+                   ELSE outcome
+               END,
+               source_updated_at, payload_hash, parser_version, office_count,
+               quota_count, error_code
+        FROM quota_observations_v3
+        """
+    )
+    connection.execute("DROP TABLE quota_observations_v3")
+    connection.execute(
+        """
+        CREATE INDEX idx_quota_observations_observed_at
+        ON quota_observations(observed_at)
+        """
+    )
+
+
 def initialize_database(connection: sqlite3.Connection) -> None:
     """Create or upgrade the SQLite schema idempotently."""
 
@@ -395,7 +444,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
     if current_version < 3:
         _migrate_v2_to_v3(connection)
     _ensure_v3_indexes(connection)
-    connection.execute("PRAGMA user_version = 3")
+    if current_version < 4:
+        _migrate_v3_to_v4(connection)
+    connection.execute("PRAGMA user_version = 4")
     connection.commit()
 
 

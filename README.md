@@ -16,7 +16,7 @@
 - `ValidatedSnapshot`：只有通过验证的完整快照才允许驱动状态变化。
 - `quota_observations` 审计模型：获取失败、解析失败与配额状态严格分离。
 - GovHK / 入境事务处公开配额 `getSituation` Source Adapter（默认 `svcId=579`）。
-- Source Adapter 对 timeout、403、429、5xx、空响应、非法 JSON、未知状态值和 source 更新时间倒退进行失败分类。
+- Source Adapter 对 timeout、403、429、5xx、空响应、非法 JSON、未知状态值进行失败分类；完整但较旧的 source 快照记录为 `stale`，不进入状态机。
 - `office[] × date` 一致性检查：对响应中出现的日期，缺少预期办事处数据时拒绝快照，不把部分响应误判为名额消失。
 - `quotaR / quotaK` 解析与聚合：`quota-g -> available`、`quota-y -> limited`、`quota-r / no-quota* -> unavailable`，并保留当前有名额的 `R / K` 时段标签。
 - Confirmed State 状态机。
@@ -27,14 +27,15 @@
 - Poller 将 observation、confirmed state、quota event 持久化到 SQLite，并保留 `R / K` service periods。
 - 成功快照通过 payload hash 去重；重复 payload 仍记录成功 observation / health 时间，但不重复跑状态机。
 - Poller 重启后从 SQLite 恢复 baseline、confirmed state 与 source 更新时间。
-- 连续失败采用有上限的指数退避；jitter 只增加等待时间，不制造更高请求频率。
-- `runtime_state` 记录 `last_poll_attempt`、`last_poll_outcome`、`last_successful_poll`、`last_valid_snapshot`、`last_payload_hash`、`last_source_updated_at` 等运行信息。
+- 获取、解析或结构失败采用有上限的指数退避；`stale` 响应保持正常轮询间隔，jitter 只增加等待时间。
+- source 时间倒退仍严格禁止更新 confirmed state；同一 source 时间对应不同 payload 时记录 `source_version_conflict` 并拒绝应用。
+- `runtime_state` 记录 `last_poll_attempt`、`last_well_formed_poll`、`last_successful_poll`、`last_valid_snapshot`、`last_received_source_updated_at`、`last_source_updated_at`、最近回退秒数等运行信息。
 - SQLite schema、Source Adapter、状态机、Poller 重启/失败隔离/重复快照等自动测试。
 - GitHub Actions 在 Python 3.11 / 3.12 运行 pytest。
 - `health` 与 `soak-summary` 运维摘要；不足 3 天永远显示 `SOAK TEST NOT COMPLETE`，满 3 天也只提示人工复核，不自动宣称通过。
 - 通用 notification outbox（`verify_email / activation_test / quota_alert / manage_link`）、数据库去重键、lease recovery、1/5/15/60 分钟有界重试及 delivery audit。
 - Appointment Matcher：按有效期、办事处、日期、最低状态和退订状态匹配；一个 target 可包含多个 office。
-- SMTP 开发 Provider 抽象、Email Worker，以及首次匹配/入队/Provider 接受指标。
+- 腾讯云 SES `SendEmail` API Provider、模板消息 Email Worker，以及首次匹配/入队/Provider 接受指标。
 - 随机一次性激活码（仅存 hash）、Email 验证（仅存 token hash）、激活确认邮件、Trial 每邮箱一次、套餐目标/邮箱上限和 Goal/Family 0-match 一次性延期。
 - 短期一次性 Magic Link、目标查看/修改和退订。
 - 用户首页 `/`、普通表单 `/activate`、Magic Link 自助申请 `/manage/request`、目标管理 `/manage`、退订 `/unsubscribe`。
@@ -42,13 +43,13 @@
 - `/privacy`、`/terms`、`/refund` 试运行草案页面；正式公开收费前仍需最终确认。
 - `maintenance` one-shot 命令 + systemd timer，用于在 runtime 中实际执行 Goal / Family 的 0-match 延长判断。
 - `customer list`、`subscription list/show`、`outbox status` 轻量运营 CLI，避免过早建设 Admin Dashboard。
-- `email-smoke --to ...` 用于真实 SMTP Provider smoke test；测试邮件明确不是配额提醒。
+- `email-smoke --to ...` 使用激活确认模板执行真实腾讯云 SES API smoke test；测试邮件不是配额提醒。
 - SQLite 官方 backup API 一致性备份与保留轮换，以及非 root systemd 模板。
 
 目前 **尚未完成 / 尚未真实验证**：
 
 - 3–7 天真实连续运行 soak test；因此还不能据此宣称 Poller 已达到生产稳定性。
-- 真实 SMTP / 正式 Email Provider 投递验证。
+- 四个事务邮件模板审核及腾讯云 SES API 真实投递验证。
 - activation → verify → activation email → quota alert 的真实人工端到端验证。
 - 备份 restore 演练、进程重启演练、VPS/HTTPS/外部监控与 offsite backup。
 - Family 完整自助多邮箱邀请/验证流程（V1 仍计划隐藏、人工处理）。
@@ -202,7 +203,7 @@ python -m app soak-summary
 Launch Skeleton 的主要本地命令：
 
 ```powershell
-# Provider smoke（不是配额提醒）
+# 腾讯云 SES API Provider smoke（使用激活确认模板，不是配额提醒）
 python -m app email-smoke --to your-test@example.com
 
 # Email Worker
@@ -228,7 +229,9 @@ python -m app maintenance
 python -m app backup --retain 30
 ```
 
-SMTP 密钥、`TOKEN_SIGNING_SECRET` 和公开 URL 只从进程环境读取。`.env.example` 仅含占位值；服务不会把 SMTP 密码、激活码明文、验证 token 或 Magic Link token 写入数据库或普通日志。
+腾讯云 API 密钥、模板 ID、`TOKEN_SIGNING_SECRET` 和公开 URL 只从进程环境读取。`.env.example` 仅含占位值；服务不会把 API 密钥、激活码明文、验证 token 或 Magic Link token 写入数据库或普通日志。Email Worker 只提交审核模板 ID 与简单字符串变量；验证和管理邮件只提交签名 token，模板必须固定站点域名与路径。
+
+可直接上传腾讯云审核的四套 HTML / 纯文本模板位于 [`templates/tencent_ses/`](templates/tencent_ses/)，变量、固定链接和建议模板名称见该目录的 `README.md`。
 
 连续运行前请阅读 [`docs/LOCAL_SOAK_TEST.md`](docs/LOCAL_SOAK_TEST.md)。部署框架见 [`docs/DEPLOYMENT_PREP.md`](docs/DEPLOYMENT_PREP.md)。默认 Poller 配置只是当前工程测试基准，不代表已经获得来源方对某一具体轮询频率、第三方提醒或商业用途的许可。
 

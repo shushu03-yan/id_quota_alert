@@ -1,5 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from app.observations import ObservationOutcome, QuotaObservation
 from app.poller import QuotaPoller, calculate_poll_delay
 from app.quota import QuotaEntry, QuotaKey, QuotaStatus, validate_snapshot
@@ -51,13 +53,38 @@ def failure_result(*, minute: int, error_code="http_429") -> SourceReadResult:
     )
 
 
+def stale_result(*, minute: int, payload_hash: str, source_updated_at: datetime) -> SourceReadResult:
+    observed_at = BASE_TIME + timedelta(minutes=minute)
+    return SourceReadResult(
+        observation=QuotaObservation(
+            observed_at=observed_at,
+            outcome=ObservationOutcome.STALE,
+            source_updated_at=source_updated_at,
+            payload_hash=payload_hash,
+            parser_version="test-source-v1",
+            office_count=1,
+            quota_count=1,
+            error_code="source_time_regression",
+        ),
+        snapshot=None,
+    )
+
+
 class SequenceSource:
     def __init__(self, *results: SourceReadResult):
         self.results = list(results)
         self.previous_source_updated_at = []
+        self.previous_payload_hash = []
 
-    def read(self, *, observed_at, previous_source_updated_at=None):
+    def read(
+        self,
+        *,
+        observed_at,
+        previous_source_updated_at=None,
+        previous_payload_hash=None,
+    ):
         self.previous_source_updated_at.append(previous_source_updated_at)
+        self.previous_payload_hash.append(previous_payload_hash)
         result = self.results.pop(0)
         # The poller owns the clock. Test fixtures use matching timestamps so an
         # observation written by the fake remains internally consistent.
@@ -134,6 +161,7 @@ def test_second_snapshot_creates_event_and_survives_poller_restart(tmp_path) -> 
     assert states[KEY].status is QuotaStatus.LIMITED
     assert states[KEY].service_periods == ("K",)
     assert restarted_source.previous_source_updated_at == [first.snapshot.source_updated_at]
+    assert restarted_source.previous_payload_hash == ["hash-1"]
 
 
 def test_failed_observation_never_changes_confirmed_state(tmp_path) -> None:
@@ -204,6 +232,96 @@ def test_duplicate_payload_is_recorded_but_not_reapplied(tmp_path) -> None:
     assert cycle.events_created == 0
     assert before == after
     assert connection.execute("SELECT COUNT(*) FROM quota_observations").fetchone()[0] == 2
+
+
+def test_stale_snapshot_is_audited_without_state_change_or_backoff(tmp_path) -> None:
+    baseline = success_result(
+        QuotaStatus.AVAILABLE,
+        minute=0,
+        payload_hash="newer-hash",
+        service_periods=("R",),
+    )
+    older_source_time = baseline.snapshot.source_updated_at - timedelta(seconds=32)
+    stale = stale_result(
+        minute=1,
+        payload_hash="older-hash",
+        source_updated_at=older_source_time,
+    )
+    connection = connect_database(tmp_path / "poller.sqlite3")
+    poller = QuotaPoller(
+        connection,
+        SequenceSource(baseline, stale),
+        clock=clock_sequence(BASE_TIME, BASE_TIME + timedelta(minutes=1)),
+    )
+
+    poller.run_once()
+    before = load_quota_states(connection)[KEY]
+    cycle = poller.run_once()
+    after = load_quota_states(connection)[KEY]
+
+    assert cycle.successful is False
+    assert cycle.backoff_required is False
+    assert cycle.outcome is ObservationOutcome.STALE
+    assert cycle.events_created == 0
+    assert before == after
+    assert get_runtime_state(connection, "last_source_updated_at") == (
+        baseline.snapshot.source_updated_at.isoformat().replace("+00:00", "Z")
+    )
+    assert get_runtime_state(connection, "last_received_source_updated_at") == (
+        older_source_time.isoformat().replace("+00:00", "Z")
+    )
+    assert get_runtime_state(connection, "last_source_regression_seconds") == "32.0"
+    row = connection.execute(
+        "SELECT outcome, source_updated_at, office_count, quota_count, error_code "
+        "FROM quota_observations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert tuple(row) == (
+        "stale",
+        older_source_time.isoformat().replace("+00:00", "Z"),
+        1,
+        1,
+        "source_time_regression",
+    )
+
+
+def test_stale_snapshot_keeps_base_delay_while_real_failure_backs_off(tmp_path) -> None:
+    baseline = success_result(
+        QuotaStatus.UNAVAILABLE,
+        minute=0,
+        payload_hash="baseline-hash",
+    )
+    stale = stale_result(
+        minute=1,
+        payload_hash="stale-hash",
+        source_updated_at=baseline.snapshot.source_updated_at - timedelta(seconds=5),
+    )
+    failure = failure_result(minute=2, error_code="timeout")
+    poller = QuotaPoller(
+        connect_database(tmp_path / "poller.sqlite3"),
+        SequenceSource(baseline, stale, failure),
+        clock=clock_sequence(
+            BASE_TIME,
+            BASE_TIME + timedelta(minutes=1),
+            BASE_TIME + timedelta(minutes=2),
+        ),
+    )
+    delays = []
+
+    def stop_after_three_cycles(delay):
+        delays.append(delay)
+        if len(delays) == 3:
+            raise StopIteration
+
+    with pytest.raises(StopIteration):
+        poller.run_forever(
+            interval_seconds=60,
+            jitter_seconds=0,
+            max_backoff_seconds=900,
+            sleep=stop_after_three_cycles,
+            random_fraction=lambda: 0,
+        )
+
+    assert delays == [60, 60, 120]
 
 
 def test_status_upgrade_is_persisted_once(tmp_path) -> None:

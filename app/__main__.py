@@ -13,7 +13,7 @@ import time
 from .admin import list_customers, list_subscriptions, outbox_status, show_subscription
 from .backup import create_backup
 from .config import load_settings, validate_token_signing_secret
-from .email_provider import SMTPEmailProvider, SMTPSettings
+from .email_provider import EmailDeliveryRequest, TencentSESEmailProvider, TencentSESSettings
 from .lifecycle import (
     create_activation_code,
     create_magic_link,
@@ -40,7 +40,9 @@ def _argument_parser() -> argparse.ArgumentParser:
 
     worker = subcommands.add_parser("email-worker", help="run the notification outbox worker")
     worker.add_argument("--once", action="store_true", help="claim at most one email and exit")
-    smoke = subcommands.add_parser("email-smoke", help="send one direct SMTP smoke-test email")
+    smoke = subcommands.add_parser(
+        "email-smoke", help="send one Tencent SES API delivery test with the activation template"
+    )
     smoke.add_argument("--to", required=True, help="test recipient email")
 
     activation = subcommands.add_parser("activation-code", help="manage one-time activation codes")
@@ -112,6 +114,7 @@ def _run_poller(*, once: bool) -> int:
                 f"applied={str(result.snapshot_applied).lower()}",
                 f"duplicate={str(result.duplicate_snapshot).lower()}",
                 f"events={result.events_created}",
+                f"backoff={str(result.backoff_required).lower()}",
             ]
             if result.error_code:
                 fields.append(f"error={result.error_code}")
@@ -140,13 +143,13 @@ def _database():
     return connection
 
 
-def _smtp_provider() -> SMTPEmailProvider:
-    return SMTPEmailProvider(SMTPSettings.from_environment())
+def _email_provider() -> TencentSESEmailProvider:
+    return TencentSESEmailProvider(TencentSESSettings.from_environment())
 
 
 def _run_email_worker(*, once: bool) -> int:
     connection = _database()
-    worker = EmailWorker(connection, _smtp_provider(), worker_id=f"{socket.gethostname()}:{os.getpid()}")
+    worker = EmailWorker(connection, _email_provider(), worker_id=f"{socket.gethostname()}:{os.getpid()}")
     try:
         if once:
             print("EMAIL_WORKER processed=" + str(worker.run_once()).lower())
@@ -163,11 +166,18 @@ def _run_email_worker(*, once: bool) -> int:
 
 def _run_email_smoke(recipient: str) -> int:
     recipient = normalize_email(recipient)
-    result = _smtp_provider().send(
+    today = datetime.now(timezone.utc).date().isoformat()
+    result = _email_provider().send(EmailDeliveryRequest(
         recipient=recipient,
-        subject="HKID Alert SMTP smoke test",
-        text="This is a direct provider smoke test. It is not a quota alert and does not indicate appointment availability.",
-    )
+        subject="預約提醒投遞測試",
+        template_kind="activation_test",
+        template_data={
+            "plan_name": "Delivery test",
+            "starts_on": today,
+            "expires_on": today,
+            "target_count": "0",
+        },
+    ))
     print(
         "EMAIL_SMOKE "
         f"accepted={str(result.accepted).lower()} retryable={str(result.retryable).lower()} "

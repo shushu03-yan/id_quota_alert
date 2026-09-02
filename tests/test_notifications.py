@@ -13,8 +13,10 @@ class Provider:
     def __init__(self, result):
         self.result = result
         self.calls = 0
-    def send(self, **kwargs):
+        self.requests = []
+    def send(self, request):
         self.calls += 1
+        self.requests.append(request)
         return self.result
 
 
@@ -118,6 +120,35 @@ def test_email_worker_success_saves_provider_id_attempt_and_first_acceptance(tmp
     assert tuple(row) == ("sent", "provider-1")
     assert connection.execute("SELECT result,provider_message_id FROM delivery_attempts").fetchone()[0] == "accepted"
     assert connection.execute("SELECT first_provider_accepted_at FROM subscriptions WHERE id=?", (sub_id,)).fetchone()[0] == "2026-08-28T12:00:00Z"
+    assert provider.requests[0].template_kind == "quota_alert"
+    assert provider.requests[0].template_data == {
+        "office": "sha-tin",
+        "date": "2026-09-03",
+        "availability": "available",
+        "detected_at": "2026-08-28T12:00:00Z",
+    }
+
+
+def test_verification_delivery_passes_token_not_complete_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("TOKEN_SIGNING_SECRET", "production-secret-with-at-least-32-characters")
+    connection = _db(tmp_path)
+    queue_notification(
+        connection,
+        notification_kind="verify_email",
+        dedup_key="verify:1",
+        recipient_email="u@example.com",
+        payload={"verification_id": 1},
+        created_at=NOW,
+    )
+    connection.commit()
+    provider = Provider(EmailDeliveryResult(True, "provider-verify"))
+
+    assert EmailWorker(connection, provider, worker_id="w").run_once(now=NOW)
+    request = provider.requests[0]
+    assert request.template_kind == "verify_email"
+    assert set(request.template_data) == {"verify_token"}
+    assert "http" not in request.template_data["verify_token"]
 
 
 def test_retryable_failure_is_delayed_and_audited(tmp_path):

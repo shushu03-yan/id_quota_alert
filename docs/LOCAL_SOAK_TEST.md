@@ -13,9 +13,9 @@ Soak test 不是为了证明“能抓到一次数据”，而是验证以下长�
 - 重复 payload 不会重复跑状态机或制造重复 quota event；
 - 第一次成功快照只建立 baseline，不发送历史事件；
 - 进程停止并重新启动后 baseline、confirmed state、occurrence 与 source 时间仍然连续；
-- 来源更新时间倒退时快照被拒绝，而不是覆盖较新的 confirmed state；
-- 连续失败会触发退避，不会因为故障反而提高来源请求压力；
-- `last_successful_poll` / `last_valid_snapshot` 等 health 状态持续更新。
+- 来源更新时间倒退时快照记录为 `stale`，而不是覆盖较新的 confirmed state；
+- `stale` 保持基础间隔，只有获取、解析或结构失败触发退避；
+- `last_poll_attempt` / `last_well_formed_poll` / `last_valid_snapshot` 分别反映进程、响应和数据新鲜度。
 
 ## 2. 测试前准备
 
@@ -48,7 +48,7 @@ python -m app poll --once
 成功时应看到类似：
 
 ```text
-POLL outcome=success applied=true duplicate=false events=0
+POLL outcome=success applied=true duplicate=false events=0 backoff=false
 ```
 
 第一次成功快照 `events=0` 是预期行为，因为它只用于建立 baseline。
@@ -56,10 +56,18 @@ POLL outcome=success applied=true duplicate=false events=0
 失败时可能看到：
 
 ```text
-POLL outcome=fetch_error applied=false duplicate=false events=0 error=http_429
+POLL outcome=fetch_error applied=false duplicate=false events=0 backoff=true error=http_429
 ```
 
 这类失败也属于有效审计结果；关键是它不能改变 confirmed quota state。
+
+完整但较旧的响应会看到：
+
+```text
+POLL outcome=stale applied=false duplicate=false events=0 backoff=false error=source_time_regression
+```
+
+它同样不会改变 confirmed state，但下一轮保持基础间隔，不进入指数退避。
 
 ## 4. 检查 SQLite 初始状态
 
@@ -76,7 +84,7 @@ python -m app health
 python -m app soak-summary
 ```
 
-`health` 会在最后成功 Poll 超出阈值时显示 `STALE`，但不会自动重启进程。`soak-summary` 在 observation 时间跨度不足 3 天时固定显示 `SOAK TEST NOT COMPLETE`；达到 3 天也只会显示需要人工复核，不会自动显示 PASSED。
+`health` 分开显示 Poller 活性、完整响应活性和已应用 source 数据新鲜度。`soak-summary` 在 observation 时间跨度不足 3 天时固定显示 `SOAK TEST NOT COMPLETE`；达到 3 天也只会显示需要人工复核，不会自动显示 PASSED。
 
 可以使用 Python 快速查看关键表：
 
@@ -95,10 +103,13 @@ python -c "import sqlite3; c=sqlite3.connect('data/quota_alert.sqlite3'); [print
 - `baseline_initialized`
 - `last_poll_attempt`
 - `last_poll_outcome`
+- `last_well_formed_poll`
 - `last_successful_poll`
 - `last_valid_snapshot`
 - `last_payload_hash`
 - 来源提供更新时间时的 `last_source_updated_at`
+- `last_received_source_updated_at`
+- 发生回退时的 `last_stale_snapshot` / `last_source_regression_seconds`
 
 ## 5. 开始连续运行
 
@@ -109,16 +120,16 @@ python -m app poll
 持续运行时每轮会输出摘要日志，例如：
 
 ```text
-quota poll outcome=success applied=False duplicate=True events=0 error=- next_poll_in=63.2s
+quota poll outcome=success applied=False duplicate=True events=0 backoff=False error=- next_poll_in=63.2s
 ```
 
 或在失败时：
 
 ```text
-quota poll outcome=fetch_error applied=False duplicate=False events=0 error=http_5xx next_poll_in=124.1s
+quota poll outcome=fetch_error applied=False duplicate=False events=0 backoff=True error=http_5xx next_poll_in=124.1s
 ```
 
-观察重点不是每次都必须成功，而是失败是否被正确隔离并退避。
+观察重点不是每次都必须是新版本，而是 stale 是否被隔离且保持正常间隔、真实失败是否正确退避。
 
 使用 `Ctrl+C` 正常停止。
 
@@ -168,7 +179,7 @@ python -c "import sqlite3; c=sqlite3.connect('data/quota_alert.sqlite3'); [print
 - 重启后当前已有开放状态被批量当成新事件；
 - `quota_count` 或 office coverage 突然大幅下降却仍被标记为 success；
 - 持续 403 / 429，说明访问方式或频率需要重新评估；
-- `last_successful_poll` 长时间不更新但进程仍看起来“活着”；
+- `last_poll_attempt` 长时间不更新；或 `last_well_formed_poll` 长时间不更新但进程仍看起来“活着”；
 - source 时间倒退却仍覆盖 confirmed state；
 - SQLite 锁、损坏或事务异常导致 observation 与 state/event 部分提交；
 - 未知 quota token 被静默当成 unavailable，而不是 parse error。
@@ -194,7 +205,7 @@ python -c "import sqlite3; c=sqlite3.connect('data/quota_alert.sqlite3'); [print
 不要仅凭“进程跑满 7 天”就判定通过。先汇总：
 
 - 总 observation 数；
-- success / fetch_error / parse_error / rejected 数量与比例；
+- success / stale / fetch_error / parse_error / rejected 数量与比例；
 - 403 / 429 / 5xx / timeout 次数；
 - quota event 数；
 - 重启次数；

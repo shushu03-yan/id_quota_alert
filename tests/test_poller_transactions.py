@@ -17,7 +17,13 @@ KEY = QuotaKey(date(2026, 9, 1), "RHK")
 
 
 class OneShotSuccessfulSource:
-    def read(self, *, observed_at, previous_source_updated_at=None):
+    def read(
+        self,
+        *,
+        observed_at,
+        previous_source_updated_at=None,
+        previous_payload_hash=None,
+    ):
         snapshot = validate_snapshot(
             [QuotaEntry(KEY, QuotaStatus.AVAILABLE, ("R",))],
             observed_at=observed_at,

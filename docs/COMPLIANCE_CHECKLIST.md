@@ -6,7 +6,7 @@
 
 - [x] 自动测试覆盖 Source Adapter、Poller、State、v1/v2→v3 migration、Matcher、Outbox、Email Worker、激活码、Email Verification、套餐限制、Trial、延期保障、Magic Link、退订、Web 路由、Backup 与 Health。
 - [x] 代码使用单一共享 Poller；没有实现自动预约、验证码/排队/限流绕过、账号密码系统或按套餐加速。
-- [x] activation / verification / magic token 数据库仅存 hash；SMTP 配置仅从环境变量读取。
+- [x] activation / verification / magic token 数据库仅存 hash；腾讯云 SES API 配置仅从环境变量读取。
 - [ ] 真实 3–7 天 soak test（NOT YET VALIDATED）。
 - [ ] 真实 Email Provider 测试及完整人工端到端链路（NOT YET VALIDATED）。
 - [ ] restart 与 backup restore 演练（NOT YET VALIDATED）。
@@ -42,7 +42,7 @@
 - [ ] Trial 一次性限制仅使用邮箱或订单历史判断，不额外采集设备指纹、身份证明或手机号。
 - [ ] 已发布隐私声明，并说明资料用途、保存期限和删除方式。
 - [ ] 日志、备份和错误报告会遮盖邮箱及密钥。
-- [ ] SMTP/API 密钥只通过安全配置提供，不提交到 Git。
+- [ ] 腾讯云 API 密钥只通过安全配置提供，不提交到 Git，并使用最小权限 CAM 身份。
 
 ## 通知
 

@@ -470,7 +470,7 @@ V1 价格和周期是试运营基准。积累足够真实数据后，根据转�
 ### 当前工程状态（2026-08-28）
 
 - M1 Source / Poller 已有代码与自动测试；真实 3–7 天 soak：**NOT YET VALIDATED**。
-- M2 Matcher / 通用 Outbox / SMTP 开发 Provider / Email Worker 已代码完成并有自动测试；真实 Provider 与端到端投递：**NOT YET VALIDATED**。
+- M2 Matcher / 通用 Outbox / 腾讯云 SES SendEmail API Provider / 模板消息 Email Worker 已代码完成并有自动测试；模板审核、真实 Provider 与端到端投递：**NOT YET VALIDATED**。
 - M3 激活码、Email Verify、套餐限制、Trial、延期保障、Magic Link、最小 Web 路由已代码完成并有自动测试；真实用户流程：**NOT YET VALIDATED**。
 - SQLite 一致性 backup、rotation 和 systemd 模板已准备；restore / VPS / HTTPS / offsite backup：**NOT YET VALIDATED**。
 - 当前等级最多为 **developer test ready**；尚未达到 local pilot ready 或 paid production ready。
