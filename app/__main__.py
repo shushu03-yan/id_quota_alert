@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import os
 import socket
@@ -18,6 +18,7 @@ from .lifecycle import (
     create_activation_code,
     create_magic_link,
     extend_zero_match_guarantees,
+    hash_secret,
     list_activation_codes,
     normalize_email,
     revoke_activation_code,
@@ -50,7 +51,11 @@ def _argument_parser() -> argparse.ArgumentParser:
     create = activation_commands.add_parser("create")
     create.add_argument("--plan", choices=("trial", "quick", "goal", "family"), required=True)
     create.add_argument("--order-reference")
+    create.add_argument("--expires-days", type=int, default=30)
+    create.add_argument("--link", action="store_true", help="print the full redeem URL (activate page prefilled with the code)")
     activation_commands.add_parser("list")
+    status = activation_commands.add_parser("status")
+    status.add_argument("code", help="plaintext activation code to look up")
     revoke = activation_commands.add_parser("revoke")
     revoke.add_argument("id", type=int)
 
@@ -192,9 +197,35 @@ def _run_activation_code(args: argparse.Namespace) -> int:
         if args.activation_command == "create":
             code = create_activation_code(
                 connection, plan_code=args.plan, now=datetime.now(timezone.utc),
+                expires_in=timedelta(days=args.expires_days),
                 order_reference=args.order_reference,
             )
-            print(code)
+            if args.link:
+                base = os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
+                print(f"{base}/activate?code={code}")
+            else:
+                print(code)
+        elif args.activation_command == "status":
+            row = connection.execute(
+                "SELECT id, plan_code, status, expires_at, order_reference, redeemed_customer_id, redeemed_at "
+                "FROM activation_codes WHERE code_hash=?", (hash_secret(args.code.upper()),),
+            ).fetchone()
+            if row is None:
+                print("Activation code not found.")
+                return 1
+            customer = (
+                connection.execute(
+                    "SELECT email_normalized FROM customers WHERE id=?", (row["redeemed_customer_id"],)
+                ).fetchone()
+                if row["redeemed_customer_id"] is not None
+                else None
+            )
+            print(
+                f"id={row['id']} plan={row['plan_code']} status={row['status']} "
+                f"expires_at={row['expires_at']} order_reference={row['order_reference'] or '-'} "
+                f"redeemed_by={customer['email_normalized'] if customer else '-'} "
+                f"redeemed_at={row['redeemed_at'] or '-'}"
+            )
         elif args.activation_command == "list":
             for row in list_activation_codes(connection):
                 print(

@@ -211,7 +211,9 @@ python -m app email-worker
 
 # 激活码
 python -m app activation-code create --plan goal
+python -m app activation-code create --plan goal --expires-days 30 --link
 python -m app activation-code list
+python -m app activation-code status YOUR-CODE
 
 # Web
 python -m app web --host 127.0.0.1 --port 8080

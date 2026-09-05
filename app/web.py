@@ -168,10 +168,17 @@ class WebApplication:
                 return self._respond(start_response, "200 OK", body)
 
             if path == "/activate" and method == "GET":
+                code = parse_qs(environ.get("QUERY_STRING", "")).get("code", [""])[-1].strip().upper()
+                code_field = f"<input name='code' autocomplete='off' required value='{escape(code)}'>"
+                hint = (
+                    "<p class='muted'>兌換連結已識別你的權益碼，只需填寫 Email 和預約目標。</p>"
+                    if code
+                    else "<p class='muted'>輸入激活碼和 Email，再設定至少一個預約目標。公開版本最多顯示 6 個目標欄位；實際上限仍由套餐規則控制。</p>"
+                )
                 body = _page("啟用 HKID Alert", "<div class='card'><h1>啟用提醒</h1>"
-                    "<p class='muted'>輸入激活碼和 Email，再設定至少一個預約目標。公開版本最多顯示 6 個目標欄位；實際上限仍由套餐規則控制。</p>"
-                    "<form method='post'><label>激活碼</label><input name='code' autocomplete='off' required>"
-                    "<label>Email</label><input name='email' type='email' autocomplete='email' required>"
+                    + hint
+                    + "<form method='post'><label>激活碼</label>" + code_field
+                    + "<label>Email</label><input name='email' type='email' autocomplete='email' required>"
                     + _target_form() + "<div class='actions'><button>發送驗證郵件</button></div></form></div>")
                 return self._respond(start_response, "200 OK", body)
 
@@ -186,8 +193,10 @@ class WebApplication:
 
             if path == "/verify" and method == "GET":
                 token = parse_qs(environ.get("QUERY_STRING", "")).get("token", [""])[-1]
-                verify_activation(connection, token=token, now=self.clock())
-                return self._respond(start_response, "200 OK", _page("服務已啟用", "<div class='card'><h1>服務已啟用</h1><p>啟用確認郵件已進入發送隊列。這封確認郵件不代表目前有預約名額。</p></div>"))
+                subscription_id = verify_activation(connection, token=token, now=self.clock())
+                return self._respond(start_response, "200 OK", _page(
+                    "服務已啟用", self._activation_success_body(connection, subscription_id)
+                ))
 
             if path == "/manage/request" and method == "GET":
                 return self._respond(start_response, "200 OK", _page("管理提醒", """
@@ -289,6 +298,65 @@ class WebApplication:
             return self._respond(start_response, "400 Bad Request", _page("無法處理", f"<div class='card'><h1>無法處理</h1><p>{escape(str(exc))}</p></div>"))
         finally:
             connection.close()
+
+    def _activation_success_body(self, connection, subscription_id: int) -> str:
+        """Post-verification confirmation page: plans, expiry and active targets."""
+        subscription = connection.execute(
+            "SELECT id, plan_code, starts_at, expires_at FROM subscriptions WHERE id=?", (subscription_id,)
+        ).fetchone()
+        if subscription is None:
+            return "<div class='card'><h1>服務已啟用</h1><p>啟用確認郵件已進入發送隊列。這封確認郵件不代表目前有預約名額。</p></div>"
+        now = self.clock()
+        starts = _datetime_from_text(subscription["starts_at"]) or now
+        expires = _datetime_from_text(subscription["expires_at"]) or now
+        hk_tz = timezone(timedelta(hours=8))
+        start_hk = starts.astimezone(hk_tz)
+        expire_hk = expires.astimezone(hk_tz)
+        remaining = max(expires - now, timedelta(0))
+        days, hours = remaining.days, remaining.seconds // 3600
+        remaining_text = f"還有 {days} 天 {hours} 小時" if days else f"還有 {hours} 小時"
+        durations = {
+            "trial": "試用（24 小時）",
+            "quick": "快捷（3 天）",
+            "goal": "目標（14 天）",
+            "family": "家庭（14 天）",
+        }
+        plan_code = str(subscription["plan_code"])
+        plan_text = f"{plan_code.title()} · {durations.get(plan_code, '')}"
+        rows = []
+        for target in _group_filters(connection.execute(
+            "SELECT target_key, earliest_date, deadline, office_id, minimum_status "
+            "FROM subscription_filters WHERE subscription_id=? ORDER BY target_key,id",
+            (subscription_id,),
+        ).fetchall()):
+            offices = target["offices"]
+            office_text = "全部辦事處" if "*" in offices else "、".join(sorted(offices))
+            status_text = "少量名額或更好" if target["minimum_status"] == "limited" else "僅名額充足"
+            rows.append(
+                f"<tr><td style='padding:10px 14px;border-bottom:1px solid #e2e7ef;color:#324a6d;'>"
+                f"{escape(str(target['earliest_date']))} ～ {escape(str(target['deadline']))}"
+                f"<div style='font-size:12px;color:#66758a;'>{escape(office_text)} · {status_text}</div></td></tr>"
+            )
+        target_html = "".join(rows) or "<tr><td style='padding:10px 14px;color:#66758a;'>（無）</td></tr>"
+        return (
+            "<div class='card'><h1>服務已啟用</h1>"
+            "<p class='muted'>你的預約提醒服務已正式開始，以下是生效詳情：</p>"
+            "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0' "
+            "style='border:1px solid #e2e7ef;border-radius:12px;overflow:hidden;'>"
+            "<tr><td style='padding:10px 14px;width:30%;background:#f6f8fb;border-bottom:1px solid #e2e7ef;color:#54677b;'>套餐</td>"
+            f"<td style='padding:10px 14px;border-bottom:1px solid #e2e7ef;color:#172033;'>{escape(plan_text)}</td></tr>"
+            "<tr><td style='padding:10px 14px;background:#f6f8fb;border-bottom:1px solid #e2e7ef;color:#54677b;'>開始時間</td>"
+            f"<td style='padding:10px 14px;border-bottom:1px solid #e2e7ef;color:#172033;'>{start_hk.strftime('%Y-%m-%d %H:%M')}（香港時間）</td></tr>"
+            "<tr><td style='padding:10px 14px;background:#f6f8fb;border-bottom:1px solid #e2e7ef;color:#54677b;'>到期時間</td>"
+            f"<td style='padding:10px 14px;border-bottom:1px solid #e2e7ef;color:#172033;'>{expire_hk.strftime('%Y-%m-%d %H:%M')}（香港時間）"
+            f"<div style='font-size:12px;color:#66758a;'>{remaining_text}</div></td></tr>"
+            "<tr><td style='padding:10px 14px;background:#f6f8fb;color:#54677b;'>預約目標</td>"
+            f"<td style='padding:0;'><table role='presentation' width='100%' cellspacing='0' cellpadding='0' border='0'>{target_html}</table></td></tr></table>"
+            "<div class='notice' style='margin-top:16px;'>系統已開始監控公開預約名額。一旦出現符合上述條件的變化，"
+            "會立即發送提醒到你的郵箱；若一段時間內沒有變化，則不會打擾你。</div>"
+            "<p class='muted' style='margin-top:16px;'>如需查看或修改條件、停止服務，請使用確認郵件中的「管理提醒」連結，"
+            "或訪問 <strong>/manage/request</strong>（如 hkid-notice.com/manage/request）重新取得管理連結。</p></div>"
+        )
 
     @staticmethod
     def _respond(start_response, status: str, body: bytes):

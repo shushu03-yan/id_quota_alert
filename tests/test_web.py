@@ -39,13 +39,36 @@ def test_activation_verify_manage_and_unsubscribe_routes(tmp_path):
         clock=lambda: NOW + timedelta(minutes=1),
     )
     assert _request(app, "/activate")[0] == "200 OK"
-    assert _request(app, "/verify", query=urlencode({"token": token}))[0] == "200 OK"
+    verify_status, verify_body = _request(
+        app, "/verify", query=urlencode({"token": token})
+    )
+    assert verify_status == "200 OK"
+    assert "Trial" in verify_body
+    assert "2026-08-28 20:01" in verify_body
+    assert "sha-tin" in verify_body
+    assert "/manage/request" in verify_body
     sub = connection.execute("SELECT id,customer_id FROM subscriptions").fetchone()
     _, magic = create_magic_link(connection, customer_id=sub["customer_id"], subscription_id=sub["id"], now=NOW, signing_secret=SECRET)
     assert _request(app, "/manage", query=urlencode({"token": magic}))[0] == "200 OK"
     assert _request(app, "/unsubscribe", query=urlencode({"token": magic}))[0] == "200 OK"
     assert _request(app, "/unsubscribe", method="POST", form={"token": magic})[0] == "200 OK"
     assert connection.execute("SELECT active FROM subscriptions").fetchone()[0] == 0
+
+
+def test_activation_link_prefills_and_escapes_code(tmp_path):
+    app = WebApplication(
+        tmp_path / "web.sqlite3", signing_secret=SECRET,
+        public_base_url="https://example.test",
+    )
+
+    status, body = _request(
+        app, "/activate", query=urlencode({"code": "ab<c-2345"})
+    )
+
+    assert status == "200 OK"
+    assert "value='AB&lt;C-2345'" in body
+    assert "value='AB<C-2345'" not in body
+    assert "兌換連結已識別" in body
 
 
 def test_magic_link_target_update_uses_strict_date_validation(tmp_path):

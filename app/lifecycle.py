@@ -53,6 +53,8 @@ def create_activation_code(
     initialize_database(connection)
     if plan_code not in PLANS:
         raise ValueError("unknown plan")
+    if expires_in <= timedelta(0):
+        raise ValueError("expires_in must be positive")
     while True:
         raw = "-".join("".join(secrets.choice(CODE_ALPHABET) for _ in range(4)) for _ in range(4))
         try:
@@ -255,6 +257,12 @@ def verify_activation(connection: sqlite3.Connection, *, token: str, now: dateti
         """UPDATE activation_codes SET status='redeemed', redeemed_at=?, redeemed_customer_id=?,
            reserved_at=NULL, reservation_expires_at=NULL WHERE id=?""",
         (_datetime_to_text(now), row["customer_id"], row["activation_code_id"]),
+    )
+    # A previously unsubscribed customer who purchases again must be re-enabled for
+    # matching; inactive subscriptions stay inactive, the new one starts fresh.
+    connection.execute(
+        "UPDATE customers SET unsubscribed_at=NULL WHERE id=? AND unsubscribed_at IS NOT NULL",
+        (row["customer_id"],),
     )
     if plan.code == "trial":
         connection.execute("UPDATE customers SET trial_used_at=COALESCE(trial_used_at, ?) WHERE id=?", (_datetime_to_text(now), row["customer_id"]))

@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
+from app.__main__ import main
 from app.admin import list_customers, outbox_status
 from app.lifecycle import create_activation_code
 from app.storage import connect_database, initialize_database
@@ -103,6 +104,31 @@ def test_operator_views_mask_customer_email_and_handle_empty_outbox(tmp_path):
     assert "pilot.user@example.com" not in lines[0]
     assert outbox_status(connection) == ["outbox empty"]
     connection.close()
+
+
+def test_activation_cli_creates_redeem_link_and_reports_status(
+    tmp_path, monkeypatch, capsys
+):
+    database_path = tmp_path / "cli.sqlite3"
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.test")
+
+    assert main([
+        "activation-code", "create", "--plan", "goal",
+        "--expires-days", "14", "--link",
+    ]) == 0
+    redeem_url = capsys.readouterr().out.strip()
+    parsed = urlparse(redeem_url)
+    code = parse_qs(parsed.query)["code"][0]
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "example.test"
+    assert parsed.path == "/activate"
+
+    assert main(["activation-code", "status", code.lower()]) == 0
+    status_output = capsys.readouterr().out
+    assert "plan=goal" in status_output
+    assert "status=available" in status_output
+    assert "redeemed_by=-" in status_output
 
 
 def test_production_wsgi_factory_uses_environment(tmp_path, monkeypatch):

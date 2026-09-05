@@ -20,6 +20,7 @@ build/
 !.env.example
 *.pem
 *.key
+/SK/
 
 # Runtime data
 data/

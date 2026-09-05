@@ -29,6 +29,8 @@ python -m app health
 python -m app soak-summary
 python -m app email-smoke --to your-test@example.com
 python -m app activation-code create --plan goal
+python -m app activation-code create --plan goal --expires-days 30 --link
+python -m app activation-code status YOUR-CODE
 python -m app customer list
 python -m app subscription list
 python -m app subscription show 1

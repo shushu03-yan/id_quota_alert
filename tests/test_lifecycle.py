@@ -48,6 +48,14 @@ def test_activation_code_list_hides_hash_and_revoke_is_one_way(tmp_path):
     assert not revoke_activation_code(connection, listed[0]["id"])
 
 
+def test_activation_code_expiry_must_be_positive(tmp_path):
+    connection = _db(tmp_path)
+    with pytest.raises(ValueError, match="expires_in must be positive"):
+        create_activation_code(
+            connection, plan_code="quick", now=NOW, expires_in=timedelta(0)
+        )
+
+
 def test_verification_and_magic_tokens_are_not_stored_in_plaintext(tmp_path):
     connection = _db(tmp_path)
     code = create_activation_code(connection, plan_code="goal", now=NOW)
@@ -251,6 +259,46 @@ def test_unsubscribe_deactivates_and_cancels_pending_quota_mail(tmp_path):
     unsubscribe_customer(connection, customer_id=customer_id, now=NOW + timedelta(minutes=2))
     assert connection.execute("SELECT active FROM subscriptions WHERE id=?", (sub_id,)).fetchone()[0] == 0
     assert connection.execute("SELECT status FROM notification_outbox WHERE subscription_id=?", (sub_id,)).fetchone()[0] == "cancelled"
+
+
+def test_new_purchase_reenables_unsubscribed_customer_only_for_new_subscription(tmp_path):
+    connection = _db(tmp_path)
+    first_code = create_activation_code(connection, plan_code="quick", now=NOW)
+    first_vid = begin_activation(
+        connection, code=first_code, email="returning@example.com", targets=TARGET,
+        now=NOW, signing_secret=SECRET,
+    )
+    first_sub_id = verify_activation(
+        connection, token=verification_token(first_vid, signing_secret=SECRET),
+        now=NOW + timedelta(minutes=1),
+    )
+    customer_id = connection.execute(
+        "SELECT customer_id FROM subscriptions WHERE id=?", (first_sub_id,)
+    ).fetchone()[0]
+    unsubscribe_customer(connection, customer_id=customer_id, now=NOW + timedelta(minutes=2))
+
+    second_code = create_activation_code(
+        connection, plan_code="goal", now=NOW + timedelta(minutes=3)
+    )
+    second_vid = begin_activation(
+        connection, code=second_code, email="RETURNING@example.com", targets=TARGET,
+        now=NOW + timedelta(minutes=3), signing_secret=SECRET,
+    )
+    second_sub_id = verify_activation(
+        connection, token=verification_token(second_vid, signing_secret=SECRET),
+        now=NOW + timedelta(minutes=4),
+    )
+
+    assert connection.execute(
+        "SELECT unsubscribed_at FROM customers WHERE id=?", (customer_id,)
+    ).fetchone()[0] is None
+    states = {
+        row["id"]: row["active"]
+        for row in connection.execute(
+            "SELECT id,active FROM subscriptions WHERE customer_id=?", (customer_id,)
+        )
+    }
+    assert states == {first_sub_id: 0, second_sub_id: 1}
 
 
 def test_family_supports_three_recipients_but_other_plans_do_not(tmp_path):
